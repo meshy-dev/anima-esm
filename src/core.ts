@@ -705,7 +705,7 @@ export function createFigure(
       const N = Math.ceil(total * fps);
       const { Output, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH } = await import("anima-esm/muxers");
       const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() });
-      const videoSource = new CanvasSource(glr.canvas, { codec, bitrate: QUALITY_HIGH, keyFrameInterval: 5, latencyMode: "realtime", hardwareAcceleration: "prefer-hardware" });
+      const videoSource = new CanvasSource(glr.canvas, { codec, bitrate: QUALITY_HIGH, keyFrameInterval: 5, latencyMode: "realtime" });
       output.addVideoTrack(videoSource, { frameRate: fps });
       try {
         await output.start();
