@@ -22,7 +22,7 @@ import type { FigCtx, FigEntry, FigPos, FigSpec, Frame, NodePlace } from "./type
 // wrapper and the core entry both import from here).
 export { clamp01, lerp, smoothstep, ease } from "./helpers";
 export { DEFAULT_PALETTE, type Palette } from "./palette";
-export type { FigSpec, FigCtx, Frame, Keyframe, NodePlace, FigPos, FigEntry, Step } from "./types";
+export type { FigSpec, FigCtx, Frame, Keyframe, NodePlace, FigPos, FigEntry, Step, LabelOpts } from "./types";
 
 /** Controller returned by {@link createFigure}. Owns the canvas + buttons it
  *  created inside `mount`; call `dispose()` to tear everything down. */
@@ -50,6 +50,13 @@ export type FigureController = {
 // `key` (create/update/drop across frames) and owns all playback. No "build"
 // phase: the app (the spec's draw closure) owns its scene data.
 // ---------------------------------------------------------------------------
+
+// ctx.label primitive defaults: text color, pill backdrop fill RGB,
+// base world size (at camera.zoom==1), and backdrop alpha (~0x99/0xff).
+const LABEL_DEFAULT_COLOR = new THREE.Color(0xffffff);
+const LABEL_DEFAULT_BACKDROP = new THREE.Color(0x000000);
+const LABEL_DEFAULT_SIZE = 0.14;
+const LABEL_BACKDROP_ALPHA = 0.6;
 
 export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette?: Palette }): FigureController {
     const { keyframe_timestamps: kfs, camera: camSpec, draw } = spec;
@@ -123,6 +130,30 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
         capCtx.fillText(lines[i], 1024 / 2, by + padY + lineH / 2 + i * lineH);
       capTex.needsUpdate = true;
     };
+    // Paint a rounded-rect backdrop pill + centered bold text into a
+    // SpriteMaterial's CanvasTexture. Reuses the caption's roundRect closure.
+    // The backdrop alpha is fixed (~0.6, LABEL_BACKDROP_ALPHA); the overall
+    // sprite opacity is driven per-frame by SpriteMaterial.opacity (opts.alpha).
+    const paintLabel = (mat: THREE.SpriteMaterial, text: string, color: THREE.Color, backdrop: boolean, backdropColor: THREE.Color) => {
+      const tex = mat.map as THREE.CanvasTexture;
+      const canvas = tex.image as HTMLCanvasElement;
+      const c = canvas.getContext("2d")!;
+      c.clearRect(0, 0, canvas.width, canvas.height);
+      const S = canvas.width;
+      if (backdrop) {
+        c.globalAlpha = LABEL_BACKDROP_ALPHA;
+        c.fillStyle = "#" + backdropColor.getHexString();
+        roundRect(c, 0, 0, S, S, S * 0.1);
+        c.fill();
+        c.globalAlpha = 1;
+      }
+      c.fillStyle = "#" + color.getHexString();
+      c.font = "700 " + Math.round(S * 0.55) + "px -apple-system,'Segoe UI',Roboto,sans-serif";
+      c.textAlign = "center";
+      c.textBaseline = "middle";
+      c.fillText(text, S / 2, S / 2);
+      tex.needsUpdate = true;
+    };
     const capMat = new THREE.SpriteMaterial({ map: capTex, transparent: true, depthTest: false, depthWrite: false });
     const capSprite = new THREE.Sprite(capMat);
     capSprite.renderOrder = 999;
@@ -168,6 +199,16 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
         });
         return;
       }
+      if (e.kind === "label") {
+        // The Sprite's geometry is a three.js module-level SINGLETON shared by
+        // every Sprite (including the caption), so it must NOT be disposed
+        // (disposing it would corrupt all sprites) — only the CanvasTexture +
+        // SpriteMaterial are disposed.
+        const mat = (e.obj as THREE.Sprite).material as THREE.SpriteMaterial;
+        mat.map?.dispose();
+        mat.dispose();
+        return;
+      }
       if (e.ownsGeo) (e.obj as THREE.Mesh | THREE.Line | THREE.LineSegments).geometry.dispose();
       e.mat!.dispose();
     };
@@ -196,7 +237,8 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       | { kind: "line"; key: string; a: FigPos; b: FigPos; color: THREE.Color; alpha: number }
       | { kind: "bar"; key: string; a: FigPos; b: FigPos; radius: number; color: THREE.Color; alpha: number }
       | { kind: "quad"; key: string; verts: FigPos[]; color: THREE.Color; alpha: number }
-      | { kind: "draw"; key: string; factory: () => THREE.Object3D; pos: FigPos; alpha: number };
+      | { kind: "draw"; key: string; factory: () => THREE.Object3D; pos: FigPos; alpha: number }
+      | { kind: "label"; key: string; pos: FigPos; text: string; color: THREE.Color; backdrop: boolean; backdropColor: THREE.Color; size: number; alpha: number };
     const nodePlaces = new Map<string, NodePlace>();
     const drawCalls: DrawCall[] = [];
     const resolved = new Map<string, THREE.Vector3>(); // memo: resolved node world positions
@@ -322,6 +364,40 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
         const m = e.mat!;
         m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
+      } else if (dc.kind === "label") {
+        // 3D-anchored, screen-fixed text label: position is the resolved 3D
+        // anchor (follows the corner); apparent on-screen SIZE is held
+        // constant by compensating the Sprite scale 1/camera.zoom; depthTest off
+        // renders on top; the canvas is repainted only on content change.
+        const pos = resolveFigPos(dc.pos);
+        if (!pos) return;
+        drawnThisFrame.add(dc.key);
+        const a = clamp01(dc.alpha);
+        const sigStr = dc.text + "\u0000" + dc.color.getHexString() + "\u0000" + (dc.backdrop ? 1 : 0) + "\u0000" + dc.backdropColor.getHexString();
+        let e = retained.get(dc.key);
+        if (!e) {
+          const canvas = document.createElement("canvas");
+          canvas.width = 256; canvas.height = 256;
+          const tex = new THREE.CanvasTexture(canvas);
+          tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
+          const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
+          const obj = new THREE.Sprite(mat);
+          obj.renderOrder = 900;
+          obj.frustumCulled = false;
+          scene.add(obj);
+          e = { obj, kind: "label", ownsGeo: false, sig: "" };
+          retained.set(dc.key, e);
+        }
+        if (e.sig !== sigStr) {
+          paintLabel((e.obj as THREE.Sprite).material as THREE.SpriteMaterial, dc.text, dc.color, dc.backdrop, dc.backdropColor);
+          e.sig = sigStr;
+        }
+        e.obj.position.copy(pos);
+        const sp = e.obj as THREE.Sprite;
+        sp.userData.baseSize = dc.size;
+        sp.scale.setScalar(dc.size / camera.zoom);
+        (sp.material as THREE.SpriteMaterial).opacity = a;
+        e.obj.visible = dc.alpha > 0.001;
       } else { // draw: factory-built THREE.Object3D, retained by key; library sets position + alpha.
         const pos = resolveFigPos(dc.pos);
         if (!pos) return;
@@ -351,6 +427,7 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       bar(key, a, b, radius, color, alpha) { drawCalls.push({ kind: "bar", key: full(key), a, b, radius, color, alpha }); },
       quad(key, verts, color, alpha) { drawCalls.push({ kind: "quad", key: full(key), verts, color, alpha }); },
       draw(key, factory, pos, alpha) { drawCalls.push({ kind: "draw", key: full(key), factory, pos, alpha }); },
+      label(key, pos, text, opts) { drawCalls.push({ kind: "label", key: full(key), pos, text, color: opts?.color ?? LABEL_DEFAULT_COLOR, backdrop: opts?.backdrop ?? true, backdropColor: opts?.backdropColor ?? LABEL_DEFAULT_BACKDROP, size: opts?.size ?? LABEL_DEFAULT_SIZE, alpha: opts?.alpha ?? 1 }); },
       scope(prefix, fn) { stack.push(prefix); fn(); stack.pop(); },
     };
 
@@ -434,6 +511,16 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       if (cap !== lastCap) { drawCaption(cap); lastCap = cap; }
       pfill.style.width = (total > 0 ? clamp01(t / total) * 100 : 0) + "%";
       controls.update();
+      // reconcile sets the scale from the PREVIOUS frame's zoom, so without
+      // this re-apply the label would lag one eased frame and "breathe" during
+      // a dolly; only the SIZE is screen-fixed (the 3D-anchor position set in
+      // reconcile is unaffected by zoom).
+      for (const e of retained.values()) {
+        if (e.kind === "label" && e.obj.visible) {
+          const sp = e.obj as THREE.Sprite;
+          sp.scale.setScalar((sp.userData.baseSize as number) / camera.zoom);
+        }
+      }
       // two-pass overlay — main scene then fixed HUD caption (hudCam, never
       // zoomed) on top; autoClear off so the HUD pass does not wipe the main pass.
       renderer.clear();

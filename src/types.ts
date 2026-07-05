@@ -20,11 +20,26 @@ export type NodePlace = { abs: THREE.Vector3 } | { from: string; offset: THREE.V
  * framework resolves it to the node's world position after the draw pass). */
 export type FigPos = THREE.Vector3 | string;
 
+/** Options for the {@link FigCtx.label} primitive. */
+export type LabelOpts = {
+  /** Text color (default white). */
+  color?: THREE.Color;
+  /** Draw the rounded-rect pill backdrop (default true). */
+  backdrop?: boolean;
+  /** Pill fill RGB; the ~0.6 alpha is applied by the library (default dark). */
+  backdropColor?: THREE.Color;
+  /** Base world size at camera.zoom==1 (default ~0.14); the apparent on-screen
+   *  size is held constant by compensating the Sprite scale for the OrbitCam dolly. */
+  size?: number;
+  /** Per-frame alpha like the other primitives (default 1). */
+  alpha?: number;
+};
+
 /** Immediate-mode draw context handed to {@link FigSpec.draw} each frame.
  * Every call is BUFFERED during draw() and reconciled AFTER draw() returns,
  * because positions may be node keys whose world positions are unknown until
  * the node graph resolves. The generic primitives are `node`, `sphere`, `line`,
- * `bar`, `quad`; `draw` is the CUSTOM-primitive escape hatch (you supply a
+ * `bar`, `quad`, `label`; `draw` is the CUSTOM-primitive escape hatch (you supply a
  * THREE.Object3D, the library retains it by key + applies per-frame alpha).
  * `scope` pushes a key prefix so equal local keys do not collide across scopes. */
 export type FigCtx = {
@@ -39,6 +54,14 @@ export type FigCtx = {
    *  traverses materials to set `transparent + opacity = alpha`. On drop the
    *  library disposes the object's geometry + materials (it built them). */
   draw(key: string, factory: () => THREE.Object3D, pos: FigPos, alpha: number): void;
+  /** 3D-anchored, screen-fixed text label with a rounded-rect backdrop pill.
+   *  It sits on a 3D point (its anchor `pos`, resolved each frame so it follows
+   *  the anchor as the camera moves), stays a CONSTANT on-screen size by
+   *  compensating the Sprite scale for the OrbitCam dolly (camera.zoom), renders
+   *  in the main scene on top (depthTest off) so it survives the WebM/WebP
+   *  export, and applies per-frame `opts.alpha` to the SpriteMaterial opacity.
+   *  See {@link LabelOpts}. */
+  label(key: string, pos: FigPos, text: string, opts?: LabelOpts): void;
   scope(prefix: string, fn: () => void): void;
 };
 
