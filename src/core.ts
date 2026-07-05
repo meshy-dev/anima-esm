@@ -1,33 +1,39 @@
 // anima-esm — immediate-mode 3D animation framework: VANILLA CORE.
 //
 // The whole engine (renderer, scene, OrbitCam, the immediate-mode ctx,
-// buffer -> resolve -> reconcile render loop, renderAtTime, rAF,
-// IntersectionObserver, ResizeObserver, in-canvas caption, hover download menu,
-// WebCodecs/mediabunny WebM + WebP export) lives here in a single vanilla
-// function with NO React dependency. React is an OPTIONAL thin wrapper
-// (src/react.tsx) that calls createFigure from a <div> mount.
+// per-frame render loop, renderAtTime, rAF, IntersectionObserver,
+// ResizeObserver, in-canvas caption, hover download menu, WebCodecs/mediabunny
+// WebM + WebP export) lives here in a single vanilla function with NO React
+// dependency. React is an OPTIONAL thin wrapper (src/react.tsx) that calls
+// createFigure from a <div> mount.
 //
-// three is a peer (the consumer resolves it, e.g. via an importmap). The WebM
-// muxer (mediabunny) and the animated-WebP muxer (webp_anim) live in a SEPARATE
-// bundle (anima-esm/muxers); the core dynamic-imports them on demand only when
-// the user clicks download, so this core bundle carries zero muxer code.
+// IMMEDIATE MODE: each frame, draw() runs and the ctx primitives build three.js
+// objects into a PER-FRAME group; the group is rendered, then discarded —
+// nothing is retained across frames (no key->object map, no node graph, no
+// reconcile pass). The only internal retention is the label CanvasTexture cache
+// (content-addressed, not keyed). three is a peer (the consumer resolves it,
+// e.g. via an importmap). The WebM muxer (mediabunny) and the animated-WebP muxer
+// (webp_anim) live in a SEPARATE bundle (anima-esm/muxers); the core
+// dynamic-imports them on demand only when the user clicks download, so this
+// core bundle carries zero muxer code.
 
 import * as THREE from "three";
 import { OrbitCam } from "./orbit";
-import { clamp01 } from "./helpers";
+import { clamp01, col, type Color, type Vec3 } from "./helpers";
 import { DEFAULT_PALETTE, type Palette } from "./palette";
-import type { ColorArg, FigCtx, FigEntry, FigPos, FigSpec, Frame, NodePlace } from "./types";
+import type { FigCtx, FigPos, FigSpec, Frame } from "./types";
 
 // Re-export the public surface so `./core` is the single import site (the React
-// wrapper and the core entry both import from here).
-export { clamp01, lerp, smoothstep, ease } from "./helpers";
+// wrapper and the core entry both import from here). Helpers + Vec3/Color are
+// re-exported via src/index.ts (`export * from "./helpers"`), NOT here, to keep
+// one canonical re-export path.
 export { DEFAULT_PALETTE, type Palette } from "./palette";
-export type { FigSpec, FigCtx, Frame, Keyframe, NodePlace, FigPos, FigEntry, Step, LabelOpts, ColorArg } from "./types";
+export type { FigSpec, FigCtx, Frame, Keyframe, Step, LabelOpts, FigPos } from "./types";
 
 /** Controller returned by {@link createFigure}. Owns the canvas + buttons it
  *  created inside `mount`; call `dispose()` to tear everything down. */
 export type FigureController = {
-  /** Tear down the renderer, controls, observers, DOM, and all retained objects. */
+  /** Tear down the renderer, controls, observers, DOM, and cached label textures. */
   dispose(): void;
   /** Resume playback (un-pause). No-op while an export is running. */
   play(): void;
@@ -44,26 +50,28 @@ export type FigureController = {
 };
 
 // ---------------------------------------------------------------------------
-// createFigure: the immediate-mode figure engine (Dear ImGui-flavored). The
-// figure CODE is the state machine -- each draw call is issued every frame with
-// its own alpha (IM_COL32-style); the framework retains three.js objects by
-// `key` (create/update/drop across frames) and owns all playback. No "build"
-// phase: the app (the spec's draw closure) owns its scene data.
+// createFigure: the immediate-mode figure engine. The figure CODE is the state
+// machine — each draw call is issued every frame with its own alpha
+// (IM_COL32-style); the framework builds a fresh three.js scene for that frame,
+// renders it, then discards everything. No "build" phase, no retained objects:
+// the app (the spec's draw closure) owns its scene data.
 // ---------------------------------------------------------------------------
 
-// ctx.label primitive defaults: text color, pill backdrop fill RGB,
+// ctx.label primitive defaults: text color, pill backdrop fill,
 // base world size (at camera.zoom==1), and backdrop alpha (~0x99/0xff).
-const LABEL_DEFAULT_COLOR = new THREE.Color(0xffffff);
-const LABEL_DEFAULT_BACKDROP = new THREE.Color(0x000000);
+const LABEL_DEFAULT_COLOR = "#ffffff";
+const LABEL_DEFAULT_BACKDROP = "#000000";
 const LABEL_DEFAULT_SIZE = 0.14;
 const LABEL_BACKDROP_ALPHA = 0.6;
 
-// Evaluate a ColorArg (THREE.Color | (f)=>Color) for a given frame: a plain
-// Color is returned as-is (then .copy'd onto the material each frame, so a
-// mutated Color is picked up); a function is called with the frame to produce
-// the per-frame color — letting a spec animate/dim/highlight via COLOR.
-const evalColor = (c: ColorArg, f: Frame): THREE.Color =>
-    typeof c === "function" ? c(f) : c;
+// Plain Color (hex | Vec3) -> THREE.Color for the per-frame materials.
+const toColor = (c: Color): THREE.Color => {
+  const v = col(c);
+  return new THREE.Color(v[0], v[1], v[2]);
+};
+// Vec3 (0..1) -> "#rrggbb" for canvas fillStyle + the label cache key.
+const hexOf = (v: Vec3): string =>
+  "#" + [0, 1, 2].map((i) => Math.round(v[i] * 255).toString(16).padStart(2, "0")).join("");
 
 export function createFigure(
     spec: FigSpec,
@@ -83,11 +91,16 @@ export function createFigure(
     const FR = camSpec.frustum;
     const scene = new THREE.Scene();
     const camera = new THREE.OrthographicCamera(-FR, FR, FR, -FR, 0.1, 100);
-    camera.position.copy(camSpec.pos);
-    camera.lookAt(camSpec.target);
+    camera.position.set(camSpec.pos[0], camSpec.pos[1], camSpec.pos[2]);
+    camera.lookAt(camSpec.target[0], camSpec.target[1], camSpec.target[2]);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     renderer.setSize(SZ, SZ);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // The framework manages primitive draw order explicitly (call order, plus
+    // depthSorted reorders its bucket back-to-front), so three.js' own object
+    // sorting is disabled — add-order = render-order for the main scene. The
+    // HUD caption scene is a separate single-object pass and is unaffected.
+    renderer.sortObjects = false;
     renderer.domElement.style.display = "block";
     renderer.domElement.style.cursor = "grab";
     mount.appendChild(renderer.domElement);
@@ -95,7 +108,7 @@ export function createFigure(
     controls.enableDamping = true; controls.dampingFactor = 0.08; controls.enablePan = false;
     controls.minZoom = 0.5; controls.maxZoom = 4;
     controls.autoRotate = true; controls.autoRotateSpeed = 0.5;
-    controls.target.copy(camSpec.target); controls.update();
+    controls.target.set(camSpec.target[0], camSpec.target[1], camSpec.target[2]); controls.update();
 
     // in-canvas caption: Sprite + CanvasTexture pinned to the camera so it
     // renders INTO the WebGL canvas (the WebM export captures the canvas -- the
@@ -147,24 +160,24 @@ export function createFigure(
         capCtx.fillText(lines[i], 1024 / 2, by + padY + lineH / 2 + i * lineH);
       capTex.needsUpdate = true;
     };
-    // Paint a rounded-rect backdrop pill + centered bold text into a
-    // SpriteMaterial's CanvasTexture. Reuses the caption's roundRect closure.
-    // The backdrop alpha is fixed (~0.6, LABEL_BACKDROP_ALPHA); the overall
-    // sprite opacity is driven per-frame by SpriteMaterial.opacity (opts.alpha).
-    const paintLabel = (mat: THREE.SpriteMaterial, text: string, color: THREE.Color, backdrop: boolean, backdropColor: THREE.Color) => {
-      const tex = mat.map as THREE.CanvasTexture;
-      const canvas = tex.image as HTMLCanvasElement;
+    // Paint a rounded-rect backdrop pill + centered bold text onto a CACHED
+    // label canvas (one per unique content key). Reuses the caption's roundRect
+    // closure. The backdrop alpha is fixed (~0.6, LABEL_BACKDROP_ALPHA); the
+    // overall sprite opacity is driven per-frame by the SpriteMaterial.opacity
+    // (opts.alpha) on a FRESH per-frame material — the cached texture is NOT
+    // disposed (it is reused across frames).
+    const paintLabel = (canvas: HTMLCanvasElement, tex: THREE.CanvasTexture, text: string, color: Vec3, backdrop: boolean, backdropColor: Vec3) => {
       const c = canvas.getContext("2d")!;
       c.clearRect(0, 0, canvas.width, canvas.height);
       const S = canvas.width;
       if (backdrop) {
         c.globalAlpha = LABEL_BACKDROP_ALPHA;
-        c.fillStyle = "#" + backdropColor.getHexString();
+        c.fillStyle = hexOf(backdropColor);
         roundRect(c, 0, 0, S, S, S * 0.1);
         c.fill();
         c.globalAlpha = 1;
       }
-      c.fillStyle = "#" + color.getHexString();
+      c.fillStyle = hexOf(color);
       c.font = "700 " + Math.round(S * 0.55) + "px -apple-system,'Segoe UI',Roboto,sans-serif";
       c.textAlign = "center";
       c.textBaseline = "middle";
@@ -190,306 +203,225 @@ export function createFigure(
     drawCaption(kfs[0]?.caption ?? "");
     lastCap = kfs[0]?.caption ?? "";
 
-    // retained three.js objects, reconciled by key each frame.
-    const retained = new Map<string, FigEntry>();
+    // Long-lived disposables (the shared sphere geometry only — everything else
+    // is per-frame). The shared sphereGeo is NEVER disposed per frame; `sphere`
+    // scales the unit geometry by its radius arg.
     const disposables: Array<{ dispose: () => void }> = [];
     const track = <T extends { dispose: () => void }>(d: T): T => { disposables.push(d); return d; };
-    // shared geometry for the generic primitives. `sphere` scales the unit sphere
-    // by its radius arg; `bar` builds a per-key cylinder. (cube/vd/crossing/edge/tri
-    // domain primitives were removed — build them yourself via ctx.draw().)
     const sphereGeo = track(new THREE.SphereGeometry(1, 16, 12));
     const UP = new THREE.Vector3(0, 1, 0);
-    const drawnThisFrame = new Set<string>();
-    // Dispose a retained entry. For the generic library primitives (line/bar/
-    // quad/sphere) we own the geometry (when ownsGeo) and the material. For the
-    // custom draw() primitive the CONSUMER owns the object's geometry/material
-    // lifecycle (they built the THREE.Object3D), so we only scene.remove it (the
-    // caller does that) and dispose nothing here.
-    const disposeEntry = (e: FigEntry) => {
-      if (e.kind === "draw") {
-        // factory-built: the library owns the object -> dispose its geometry + materials.
-        e.obj.traverse((o) => {
-          const m = o as THREE.Mesh & { geometry?: THREE.BufferGeometry; material?: THREE.Material | THREE.Material[] };
-          m.geometry?.dispose();
-          const mat = m.material;
-          if (mat) (Array.isArray(mat) ? mat : [mat]).forEach((mm) => mm.dispose());
-        });
-        return;
-      }
-      if (e.kind === "label") {
-        // The Sprite's geometry is a three.js module-level SINGLETON shared by
-        // every Sprite (including the caption), so it must NOT be disposed
-        // (disposing it would corrupt all sprites) — only the CanvasTexture +
-        // SpriteMaterial are disposed.
-        const mat = (e.obj as THREE.Sprite).material as THREE.SpriteMaterial;
-        mat.map?.dispose();
-        mat.dispose();
-        return;
-      }
-      if (e.ownsGeo) (e.obj as THREE.Mesh | THREE.Line | THREE.LineSegments).geometry.dispose();
-      e.mat!.dispose();
-    };
-    const sig = (pts: THREE.Vector3[]): string =>
-      pts.map((p) => p.x.toFixed(4) + "," + p.y.toFixed(4) + "," + p.z.toFixed(4)).join("|");
-    const quadGeo = (verts: THREE.Vector3[]): THREE.BufferGeometry => {
+
+    // PER-FRAME group: every primitive builds its THREE object into this group
+    // RIGHT NOW (during draw()); renderAtTime renders it then discards
+    // everything. Nothing is retained across frames (no key registry, no node
+    // graph, no reconcile pass). Assigned each frame in renderAtTime before
+    // draw() runs.
+    let frameGroup!: THREE.Group;
+    // MODE STACK: a per-draw-call stack of depth modes. The bottom entry is
+    // always DEFAULT (depthTest=false, collect=null) so primitives issued
+    // outside any scope go straight to frameGroup with depthTest=false. Each
+    // depthSorted scope pushes { depthTest: false, collect: [] } (the bucket);
+    // each depthTested scope pushes { depthTest: true, collect: null }. The
+    // stack unwinds back to the bottom after each draw() since the scope
+    // methods push/pop synchronously.
+    const modeStack: Array<{ depthTest: boolean; collect: THREE.Object3D[] | null }> = [{ depthTest: false, collect: null }];
+    // label content cache: the ONLY internal retention — content-addressed
+    // (text + color hex + backdrop + backdropColor hex), NOT keyed by a user
+    // string. The CanvasTexture is painted once per unique content and reused
+    // across frames; each frame creates a FRESH SpriteMaterial (disposed after
+    // render, NOT the cached texture).
+    const labelCache = new Map<string, { canvas: HTMLCanvasElement; tex: THREE.CanvasTexture }>();
+    const quadGeo = (verts: Vec3[]): THREE.BufferGeometry => {
       const g = new THREE.BufferGeometry();
       const arr = new Float32Array(verts.length * 3);
-      verts.forEach((p, i) => { arr[i * 3] = p.x; arr[i * 3 + 1] = p.y; arr[i * 3 + 2] = p.z; });
+      verts.forEach((p, i) => { arr[i * 3] = p[0]; arr[i * 3 + 1] = p[1]; arr[i * 3 + 2] = p[2]; });
       g.setAttribute("position", new THREE.BufferAttribute(arr, 3));
       g.setIndex([0, 1, 2, 0, 2, 3]);
       return g;
     };
-    const trisGeo = (tris: THREE.Vector3[][]): THREE.BufferGeometry => {
+    const trisGeo = (tris: Vec3[][]): THREE.BufferGeometry => {
       const g = new THREE.BufferGeometry();
       const arr = new Float32Array(tris.length * 9);
       tris.forEach((t, i) => {
         for (let j = 0; j < 3; j++) {
           const p = t[j], k = (i * 3 + j) * 3;
-          arr[k] = p.x; arr[k + 1] = p.y; arr[k + 2] = p.z;
+          arr[k] = p[0]; arr[k + 1] = p[1]; arr[k + 2] = p[2];
         }
       });
       g.setAttribute("position", new THREE.BufferAttribute(arr, 3));
       return g;
     };
-
-    // ctx BUFFERS during draw(): nodes and draw calls are recorded and only
-    // reconciled AFTER draw returns, because positions may be node keys
-    // (string) whose world positions are unknown until the node graph resolves.
-    const stack: string[] = [];
-    const full = (key: string): string => (stack.length ? stack.join("/") + "/" + key : key);
-    // Buffered draw calls (generic primitives only — no domain primitives).
-    // `draw` carries a FACTORY (called once on first draw) + a FigPos (resolved
-    // each frame); the library builds + retains the object, sets its position,
-    // and owns its geometry/material lifecycle (disposes on drop).
-    type DrawCall =
-      | { kind: "sphere"; key: string; pos: FigPos; radius: number; color: ColorArg; alpha: number }
-      | { kind: "line"; key: string; a: FigPos; b: FigPos; color: ColorArg; alpha: number }
-      | { kind: "bar"; key: string; a: FigPos; b: FigPos; radius: number; color: ColorArg; alpha: number }
-      | { kind: "quad"; key: string; verts: FigPos[]; color: ColorArg; alpha: number }
-      | { kind: "triangles"; key: string; tris: FigPos[][]; color: ColorArg; alpha: number }
-      | { kind: "draw"; key: string; factory: () => THREE.Object3D; pos: FigPos; alpha: number; colorFn?: (f: Frame) => THREE.Color }
-      | { kind: "label"; key: string; pos: FigPos; text: string; color: THREE.Color; backdrop: boolean; backdropColor: THREE.Color; size: number; alpha: number };
-    const nodePlaces = new Map<string, NodePlace>();
-    const drawCalls: DrawCall[] = [];
-    const resolved = new Map<string, THREE.Vector3>(); // memo: resolved node world positions
-    const visiting = new Set<string>();                 // cycle guard during node resolution
-    const failed = new Set<string>();                   // memo: nodes that failed to resolve
-    // Resolve a node key to a world position (topological, memoized). `abs` ->
-    // abs.clone(); `from` -> parent.clone().add(offset). A node is unresolved
-    // (absent from `resolved`) if it was not placed this frame, its parent is
-    // unresolved, or it is on a cycle (guarded by `visiting`; no infinite loop).
-    const resolveNode = (key: string): THREE.Vector3 | null => {
-      if (resolved.has(key)) return resolved.get(key)!;
-      if (failed.has(key)) return null;
-      const place = nodePlaces.get(key);
-      if (!place) return null;
-      if (visiting.has(key)) return null;
-      visiting.add(key);
-      let v: THREE.Vector3 | null = null;
-      if ("abs" in place) v = place.abs.clone();
-      else {
-        const parent = resolveNode(place.from);
-        if (parent) v = parent.clone().add(place.offset);
-      }
-      visiting.delete(key);
-      if (v) resolved.set(key, v); else failed.add(key);
-      return v;
+    // Discard a per-frame group: dispose per-frame geometries (EXCEPT the shared
+    // sphereGeo and the Sprite singleton geometry) + per-frame materials (the
+    // cached label textures are NOT disposed — SpriteMaterial.dispose does not
+    // touch its map, and the cache owns them).
+    const disposeFrameGroup = (g: THREE.Group) => {
+      g.traverse((o) => {
+        const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+        if (mat) (Array.isArray(mat) ? mat : [mat]).forEach((m) => m.dispose());
+        const geo = (o as THREE.Mesh).geometry as THREE.BufferGeometry | undefined;
+        if (geo && geo !== sphereGeo && !(o instanceof THREE.Sprite)) geo.dispose();
+      });
+      g.clear();
     };
-    const resolveFigPos = (p: FigPos): THREE.Vector3 | null =>
-      typeof p === "string" ? (resolved.get(p) ?? null) : p;
-    // Reconcile one buffered draw call against the retained map using its
-    // RESOLVED world positions. If any position arg resolves to null (a node
-    // not placed / unresolved / cyclic), skip it entirely: do NOT add its key to
-    // drawnThisFrame so its retained object drops this frame. Generic primitives:
-    // sphere -> Mesh of the unit sphereGeo scaled by radius; line -> LineSegments
-    // from 2 points, sig-rebuild; bar -> oriented cylinder a->b, sig-rebuild; quad
-    // -> Mesh of quadGeo(verts), DoubleSide, sig-rebuild. draw -> a consumer-built
-    // THREE.Object3D retained by key (add on first draw, reuse on update, remove
-    // on drop): the library owns ONLY its scene membership + per-frame alpha (it
-    // sets object.visible + traverses materials to apply opacity); the consumer
-    // owns the object's geometry/material lifecycle.
-    const reconcile = (dc: DrawCall, f: Frame): void => {
-      if (dc.kind === "sphere") {
-        const pos = resolveFigPos(dc.pos);
-        if (!pos) return;
-        drawnThisFrame.add(dc.key);
-        const col = evalColor(dc.color, f);
-        let e = retained.get(dc.key);
-        if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: col.clone(), transparent: true, opacity: 0 });
-          const obj = new THREE.Mesh(sphereGeo, mat);
-          scene.add(obj);
-          e = { obj, mat, kind: "sphere", ownsGeo: false, sig: "" };
-          retained.set(dc.key, e);
-        }
-        e.obj.position.copy(pos);
-        (e.obj as THREE.Mesh).scale.setScalar(dc.radius);
-        const m = e.mat!;
-        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "line") {
-        const a = resolveFigPos(dc.a), b = resolveFigPos(dc.b);
-        if (!a || !b) return;
-        drawnThisFrame.add(dc.key);
-        const col = evalColor(dc.color, f);
-        const s = sig([a, b]);
-        let e = retained.get(dc.key);
-        if (!e) {
-          const mat = new THREE.LineBasicMaterial({ color: col.clone(), transparent: true, opacity: 0 });
-          const obj = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]), mat);
-          scene.add(obj);
-          e = { obj, mat, kind: "line", ownsGeo: true, sig: s };
-          retained.set(dc.key, e);
-        } else if (e.sig !== s) {
-          (e.obj as THREE.LineSegments).geometry.dispose();
-          (e.obj as THREE.LineSegments).geometry = new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]);
-          e.sig = s;
-        }
-        const m = e.mat!;
-        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "bar") {
-        const a = resolveFigPos(dc.a), b = resolveFigPos(dc.b);
-        if (!a || !b) return;
-        drawnThisFrame.add(dc.key);
-        const col = evalColor(dc.color, f);
-        const len = a.distanceTo(b);
-        const mid = a.clone().add(b).multiplyScalar(0.5);
-        const dir = b.clone().sub(a).normalize();
-        const s = dc.radius.toFixed(4) + "|" + sig([a, b]);
-        let e = retained.get(dc.key);
-        if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: col.clone(), transparent: true, opacity: 0 });
-          const obj = new THREE.Mesh(new THREE.CylinderGeometry(dc.radius, dc.radius, len, 12), mat);
-          obj.position.copy(mid);
-          obj.quaternion.setFromUnitVectors(UP, dir);
-          scene.add(obj);
-          e = { obj, mat, kind: "bar", ownsGeo: true, sig: s };
-          retained.set(dc.key, e);
-        } else if (e.sig !== s) {
-          (e.obj as THREE.Mesh).geometry.dispose();
-          (e.obj as THREE.Mesh).geometry = new THREE.CylinderGeometry(dc.radius, dc.radius, len, 12);
-          (e.obj as THREE.Mesh).position.copy(mid);
-          (e.obj as THREE.Mesh).quaternion.setFromUnitVectors(UP, dir);
-          e.sig = s;
-        }
-        const m = e.mat!;
-        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "quad") {
-        const vs = dc.verts.map(resolveFigPos);
-        if (vs.some((v) => !v)) return;
-        const verts = vs as THREE.Vector3[];
-        drawnThisFrame.add(dc.key);
-        const col = evalColor(dc.color, f);
-        const s = sig(verts);
-        let e = retained.get(dc.key);
-        if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: col.clone(), transparent: true, opacity: 0, side: THREE.DoubleSide });
-          const obj = new THREE.Mesh(quadGeo(verts), mat);
-          scene.add(obj);
-          e = { obj, mat, kind: "quad", ownsGeo: true, sig: s };
-          retained.set(dc.key, e);
-        } else if (e.sig !== s) {
-          (e.obj as THREE.Mesh).geometry.dispose();
-          (e.obj as THREE.Mesh).geometry = quadGeo(verts);
-          e.sig = s;
-        }
-        const m = e.mat!;
-        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "triangles") {
-        const tris = dc.tris.map((t) => t.map(resolveFigPos));
-        if (tris.some((t) => t.some((v) => !v))) return;
-        const flat = tris as THREE.Vector3[][];
-        drawnThisFrame.add(dc.key);
-        const col = evalColor(dc.color, f);
-        const s = sig(flat.flat());
-        let e = retained.get(dc.key);
-        if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: col.clone(), transparent: true, opacity: 0, side: THREE.DoubleSide });
-          const obj = new THREE.Mesh(trisGeo(flat), mat);
-          scene.add(obj);
-          e = { obj, mat, kind: "triangles", ownsGeo: true, sig: s };
-          retained.set(dc.key, e);
-        } else if (e.sig !== s) {
-          (e.obj as THREE.Mesh).geometry.dispose();
-          (e.obj as THREE.Mesh).geometry = trisGeo(flat);
-          e.sig = s;
-        }
-        const m = e.mat!;
-        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "label") {
-        // 3D-anchored, screen-fixed text label: position is the resolved 3D
-        // anchor (follows the corner); apparent on-screen SIZE is held
-        // constant by compensating the Sprite scale 1/camera.zoom; depthTest off
-        // renders on top; the canvas is repainted only on content change.
-        const pos = resolveFigPos(dc.pos);
-        if (!pos) return;
-        drawnThisFrame.add(dc.key);
-        const a = clamp01(dc.alpha);
-        const sigStr = dc.text + "\u0000" + dc.color.getHexString() + "\u0000" + (dc.backdrop ? 1 : 0) + "\u0000" + dc.backdropColor.getHexString();
-        let e = retained.get(dc.key);
-        if (!e) {
+    // addObject: add an object to the current render target. Walk the modeStack
+    // from the top down; the first entry whose `collect` is non-null is the
+    // enclosing depthSorted bucket — push `o` onto that array (it is NOT a
+    // scene-graph node, just a held list sorted + appended to the parent target
+    // on scope close). If no enclosing depthSorted scope is found, add `o`
+    // directly to frameGroup.
+    const addObject = (o: THREE.Object3D): void => {
+      for (let i = modeStack.length - 1; i >= 0; i--) {
+        const m = modeStack[i];
+        if (m.collect) { m.collect.push(o); return; }
+      }
+      frameGroup.add(o);
+    };
+    // topDepthTest: the depthTest flag for primitives created under the
+    // current innermost mode (bottom of the stack).
+    const topDepthTest = (): boolean => modeStack[modeStack.length - 1].depthTest;
+    // centroidOf: computes the per-primitive centroid (a THREE.Vector3) used
+    // by the depthSorted back-to-front sort. Stashed on obj.userData.centroid
+    // at build time so the sort compares one precomputed point against
+    // camera.position.
+    const centroidOf = {
+      pos: (p: Vec3): THREE.Vector3 => new THREE.Vector3(p[0], p[1], p[2]),
+      mid: (a: Vec3, b: Vec3): THREE.Vector3 =>
+        new THREE.Vector3((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5),
+      avg: (verts: Vec3[]): THREE.Vector3 => {
+        const n = verts.length || 1;
+        let x = 0, y = 0, z = 0;
+        for (const v of verts) { x += v[0]; y += v[1]; z += v[2]; }
+        return new THREE.Vector3(x / n, y / n, z / n);
+      },
+      tris: (tris: Vec3[][]): THREE.Vector3 => {
+        const n = tris.length * 3 || 1;
+        let x = 0, y = 0, z = 0;
+        for (const t of tris) for (const v of t) { x += v[0]; y += v[1]; z += v[2]; }
+        return new THREE.Vector3(x / n, y / n, z / n);
+      },
+    };
+    // Immediate-mode ctx: each call builds a THREE object RIGHT NOW, adds it to
+    // the per-frame frameGroup, applies color (via toColor) + clamp01(alpha),
+    // sets visible = alpha > 0.001, and returns its first input Vec3.
+    const ctx: FigCtx = {
+      sphere(pos, radius, color, alpha) {
+        const a = clamp01(alpha);
+        const mat = new THREE.MeshBasicMaterial({ color: toColor(color), transparent: true, opacity: a, depthWrite: true, depthTest: topDepthTest() });
+        const m = new THREE.Mesh(sphereGeo, mat);
+        m.position.set(pos[0], pos[1], pos[2]);
+        m.scale.setScalar(radius);
+        m.visible = a > 0.001;
+        m.userData.centroid = centroidOf.pos(pos);
+        addObject(m);
+        return pos;
+      },
+      line(a, b, color, alpha) {
+        const av = clamp01(alpha);
+        const mat = new THREE.LineBasicMaterial({ color: toColor(color), transparent: true, opacity: av, depthWrite: true, depthTest: topDepthTest() });
+        const geo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(a[0], a[1], a[2]),
+          new THREE.Vector3(b[0], b[1], b[2]),
+        ]);
+        const ls = new THREE.LineSegments(geo, mat);
+        ls.visible = av > 0.001;
+        ls.userData.centroid = centroidOf.mid(a, b);
+        addObject(ls);
+        return a;
+      },
+      bar(a, b, radius, color, alpha) {
+        const av = clamp01(alpha);
+        const va = new THREE.Vector3(a[0], a[1], a[2]);
+        const vb = new THREE.Vector3(b[0], b[1], b[2]);
+        const len = va.distanceTo(vb);
+        const mid = va.clone().add(vb).multiplyScalar(0.5);
+        const dir = vb.clone().sub(va).normalize();
+        const mat = new THREE.MeshBasicMaterial({ color: toColor(color), transparent: true, opacity: av, depthWrite: true, depthTest: topDepthTest() });
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, len, 12), mat);
+        m.position.copy(mid);
+        m.quaternion.setFromUnitVectors(UP, dir);
+        m.visible = av > 0.001;
+        m.userData.centroid = centroidOf.mid(a, b);
+        addObject(m);
+        return a;
+      },
+      quad(verts, color, alpha) {
+        const a = clamp01(alpha);
+        const mat = new THREE.MeshBasicMaterial({ color: toColor(color), transparent: true, opacity: a, depthWrite: true, depthTest: topDepthTest(), side: THREE.DoubleSide });
+        const m = new THREE.Mesh(quadGeo(verts), mat);
+        m.visible = a > 0.001;
+        m.userData.centroid = centroidOf.avg(verts);
+        addObject(m);
+        return verts[0];
+      },
+      triangles(tris, color, alpha) {
+        const a = clamp01(alpha);
+        const mat = new THREE.MeshBasicMaterial({ color: toColor(color), transparent: true, opacity: a, depthWrite: true, depthTest: topDepthTest(), side: THREE.DoubleSide });
+        const m = new THREE.Mesh(trisGeo(tris), mat);
+        m.visible = a > 0.001;
+        m.userData.centroid = centroidOf.tris(tris);
+        addObject(m);
+        return tris[0]?.[0] ?? [0, 0, 0];
+      },
+      label(pos, text, opts) {
+        const color = col(opts?.color ?? LABEL_DEFAULT_COLOR);
+        const backdrop = opts?.backdrop ?? true;
+        const backdropColor = col(opts?.backdropColor ?? LABEL_DEFAULT_BACKDROP);
+        const size = opts?.size ?? LABEL_DEFAULT_SIZE;
+        const a = clamp01(opts?.alpha ?? 1);
+        const key = text + "\u0000" + hexOf(color) + "\u0000" + (backdrop ? 1 : 0) + "\u0000" + hexOf(backdropColor);
+        let c = labelCache.get(key);
+        if (!c) {
           const canvas = document.createElement("canvas");
           canvas.width = 256; canvas.height = 256;
           const tex = new THREE.CanvasTexture(canvas);
           tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
-          const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
-          const obj = new THREE.Sprite(mat);
-          obj.renderOrder = 900;
-          obj.frustumCulled = false;
-          scene.add(obj);
-          e = { obj, kind: "label", ownsGeo: false, sig: "" };
-          retained.set(dc.key, e);
+          paintLabel(canvas, tex, text, color, backdrop, backdropColor);
+          c = { canvas, tex };
+          labelCache.set(key, c);
         }
-        if (e.sig !== sigStr) {
-          paintLabel((e.obj as THREE.Sprite).material as THREE.SpriteMaterial, dc.text, dc.color, dc.backdrop, dc.backdropColor);
-          e.sig = sigStr;
+        const mat = new THREE.SpriteMaterial({ map: c.tex, transparent: true, depthTest: topDepthTest(), depthWrite: false, opacity: a });
+        const sp = new THREE.Sprite(mat);
+        sp.renderOrder = 900;
+        sp.frustumCulled = false;
+        sp.position.set(pos[0], pos[1], pos[2]);
+        sp.scale.setScalar(size / camera.zoom);
+        sp.visible = a > 0.001;
+        sp.userData.centroid = centroidOf.pos(pos);
+        addObject(sp);
+        return pos;
+      },
+      // depthSorted: primitives issued inside `fn` are collected into a
+      // bucket (held in the modeStack entry, NOT added to the scene graph yet).
+      // On scope close the bucket is sorted back-to-front by descending
+      // camera-distance so far primitives render first and near primitives
+      // last (correct alpha blending order), then each held object is appended
+      // to the parent target via addObject (which, now that this mode is popped,
+      // targets the next depthSorted bucket down or frameGroup).
+      depthSorted(fn) {
+        modeStack.push({ depthTest: false, collect: [] });
+        try {
+          fn();
+        } finally {
+          const mode = modeStack.pop()!;
+          const bucket = mode.collect!;
+          bucket.sort((a: THREE.Object3D, b: THREE.Object3D) =>
+            camera.position.distanceTo(b.userData.centroid as THREE.Vector3) -
+            camera.position.distanceTo(a.userData.centroid as THREE.Vector3));
+          for (const o of bucket) addObject(o);
         }
-        e.obj.position.copy(pos);
-        const sp = e.obj as THREE.Sprite;
-        sp.userData.baseSize = dc.size;
-        sp.scale.setScalar(dc.size / camera.zoom);
-        (sp.material as THREE.SpriteMaterial).opacity = a;
-        e.obj.visible = dc.alpha > 0.001;
-      } else { // draw: factory-built THREE.Object3D, retained by key; library sets position + alpha (+ optional color).
-        const pos = resolveFigPos(dc.pos);
-        if (!pos) return;
-        drawnThisFrame.add(dc.key);
-        let e = retained.get(dc.key);
-        if (!e) {
-          const obj = dc.factory();
-          scene.add(obj);
-          e = { obj, kind: "draw", ownsGeo: true, sig: "" };
-          retained.set(dc.key, e);
+      },
+      // depthTested: primitives issued inside `fn` are added directly to the
+      // parent target in call order with depthTest=true (the GPU depth buffer
+      // handles ordering); nothing to sort on scope close — just pop the mode.
+      depthTested(fn) {
+        modeStack.push({ depthTest: true, collect: null });
+        try {
+          fn();
+        } finally {
+          modeStack.pop();
         }
-        e.obj.position.copy(pos);
-        const a = clamp01(dc.alpha);
-        e.obj.visible = dc.alpha > 0.001;
-        const col = dc.colorFn ? dc.colorFn(f) : null;
-        e.obj.traverse((o) => {
-          const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
-          if (!mat) return;
-          const mats = Array.isArray(mat) ? mat : [mat];
-          for (const mm of mats) {
-            mm.transparent = true; mm.opacity = a;
-            if (col && "color" in mm) (mm as THREE.MeshBasicMaterial).color.copy(col);
-          }
-        });
-      }
-    };
-    const ctx: FigCtx = {
-      node(key, place) { nodePlaces.set(full(key), place); },
-      sphere(key, pos, radius, color, alpha) { drawCalls.push({ kind: "sphere", key: full(key), pos, radius, color, alpha }); },
-      line(key, a, b, color, alpha) { drawCalls.push({ kind: "line", key: full(key), a, b, color, alpha }); },
-      bar(key, a, b, radius, color, alpha) { drawCalls.push({ kind: "bar", key: full(key), a, b, radius, color, alpha }); },
-      quad(key, verts, color, alpha) { drawCalls.push({ kind: "quad", key: full(key), verts, color, alpha }); },
-      triangles(key, tris, color, alpha) { drawCalls.push({ kind: "triangles", key: full(key), tris, color, alpha }); },
-      draw(key, factory, pos, alpha, colorFn) { drawCalls.push({ kind: "draw", key: full(key), factory, pos, alpha, colorFn }); },
-      label(key, pos, text, opts) { drawCalls.push({ kind: "label", key: full(key), pos, text, color: opts?.color ?? LABEL_DEFAULT_COLOR, backdrop: opts?.backdrop ?? true, backdropColor: opts?.backdropColor ?? LABEL_DEFAULT_BACKDROP, size: opts?.size ?? LABEL_DEFAULT_SIZE, alpha: opts?.alpha ?? 1 }); },
-      scope(prefix, fn) { stack.push(prefix); fn(); stack.pop(); },
+      },
     };
 
     // engine DOM: replay/pause buttons + slim progress bar. The caption is
@@ -557,37 +489,26 @@ export function createFigure(
         }
       }
       const f: Frame = { step, t, dt, tStep, pStep, paused: capturing ? false : userPaused || !inView };
-      // BUFFER: clear per-frame buffers, run the spec's draw (ctx only buffers),
-      // RESOLVE the node graph, RECONCILE each buffered draw call, then drop
-      // any retained object not drawn this frame.
-      nodePlaces.clear(); drawCalls.length = 0; drawnThisFrame.clear();
-      resolved.clear(); visiting.clear(); failed.clear();
+      // controls.update() BEFORE draw() so label scales use the CURRENT
+      // camera.zoom — no post-render label-scale re-apply needed.
+      controls.update();
+      // PER-FRAME group: draw() builds everything into it; render; then discard.
+      frameGroup = new THREE.Group();
+      scene.add(frameGroup);
       draw(ctx, f);
-      for (const key of nodePlaces.keys()) resolveNode(key);
-      for (const dc of drawCalls) reconcile(dc, f);
-      for (const [k, e] of retained) {
-        if (!drawnThisFrame.has(k)) { scene.remove(e.obj); disposeEntry(e); retained.delete(k); }
-      }
       const cap = kfs[step]?.caption ?? "";
       if (cap !== lastCap) { drawCaption(cap); lastCap = cap; }
       pfill.style.width = (total > 0 ? clamp01(t / total) * 100 : 0) + "%";
-      controls.update();
-      // reconcile sets the scale from the PREVIOUS frame's zoom, so without
-      // this re-apply the label would lag one eased frame and "breathe" during
-      // a dolly; only the SIZE is screen-fixed (the 3D-anchor position set in
-      // reconcile is unaffected by zoom).
-      for (const e of retained.values()) {
-        if (e.kind === "label" && e.obj.visible) {
-          const sp = e.obj as THREE.Sprite;
-          sp.scale.setScalar((sp.userData.baseSize as number) / camera.zoom);
-        }
-      }
       // two-pass overlay — main scene then fixed HUD caption (hudCam, never
       // zoomed) on top; autoClear off so the HUD pass does not wipe the main pass.
       renderer.clear();
       renderer.render(scene, camera);
       renderer.clearDepth();
       renderer.render(hudScene, hudCam);
+      // discard the per-frame group: remove + dispose per-frame geo/mat (the
+      // cached label textures + the shared sphereGeo survive).
+      scene.remove(frameGroup);
+      disposeFrameGroup(frameGroup);
     };
     const render = (now: number) => {
       if (capturing) { raf = requestAnimationFrame(render); return; }
@@ -769,10 +690,10 @@ export function createFigure(
       menu.removeEventListener("mouseenter", cancelHide);
       menu.removeEventListener("mouseleave", startHide);
       hudScene.remove(capSprite); capMat.dispose(); capTex.dispose();
+      for (const c of labelCache.values()) c.tex.dispose();
+      labelCache.clear();
       pbar.remove(); replay.remove(); pauseBtn.remove(); downloadBtn.remove(); menu.remove();
       controls.dispose();
-      for (const e of retained.values()) disposeEntry(e);
-      retained.clear();
       disposables.forEach((d) => d.dispose());
       renderer.dispose();
       if (renderer.domElement.parentNode === mount) mount.removeChild(renderer.domElement);

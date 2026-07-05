@@ -6,4 +6,5 @@
 // import "anima-esm/react" for the optional <Figure> wrapper.
 
 export * from "./core";
+export * from "./helpers";
 export { setupAnimEngine } from "./engine";
