@@ -1,22 +1,9 @@
-// anima-esm — immediate-mode 3D animation framework.
+// anima-esm — immediate-mode 3D animation framework: VANILLA CORE entry.
 //
-// Public API surface. React, react-dom, and three are peer dependencies (the
-// consumer resolves them, e.g. via an importmap). The WebM muxer (mediabunny)
-// and the animated-WebP muxer (webp_anim) are bundled inline.
+// Public API surface. three is a peer dependency (the consumer resolves it,
+// e.g. via an importmap). The WebM muxer (mediabunny) and the animated-WebP
+// muxer (webp_anim) are bundled inline. This entry has NO React dependency —
+// import "anima-esm/react" for the optional <Figure> wrapper.
 
-export { Figure } from "./Figure";
+export * from "./core";
 export { setupAnimEngine } from "./engine";
-export { clamp01, lerp, smoothstep, ease } from "./helpers";
-export { DEFAULT_PALETTE, type Palette } from "./palette";
-export { muxAnimatedWebP } from "./vendor/webp_anim";
-
-export type {
-  FigSpec,
-  FigCtx,
-  Frame,
-  Keyframe,
-  NodePlace,
-  FigPos,
-  FigEntry,
-  Step,
-} from "./types";

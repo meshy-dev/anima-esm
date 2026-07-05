@@ -1,4 +1,15 @@
-import React, { useEffect, useRef } from "react";
+// anima-esm — immediate-mode 3D animation framework: VANILLA CORE.
+//
+// The whole engine (renderer, scene, OrbitControls, the immediate-mode ctx,
+// buffer -> resolve -> reconcile render loop, renderAtTime, rAF,
+// IntersectionObserver, ResizeObserver, in-canvas caption, hover download menu,
+// WebCodecs/mediabunny WebM + WebP export) lives here in a single vanilla
+// function with NO React dependency. React is an OPTIONAL thin wrapper
+// (src/react.tsx) that calls createFigure from a <div> mount.
+//
+// three is a peer (the consumer resolves it, e.g. via an importmap). The WebM
+// muxer (mediabunny) and the animated-WebP muxer (webp_anim) are bundled inline.
+
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Output, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH } from "./vendor/mediabunny";
@@ -7,23 +18,43 @@ import { clamp01 } from "./helpers";
 import { DEFAULT_PALETTE, type Palette } from "./palette";
 import type { FigCtx, FigEntry, FigPos, FigSpec, Frame, NodePlace } from "./types";
 
+// Re-export the public surface so `./core` is the single import site (the React
+// wrapper and the core entry both import from here).
+export { clamp01, lerp, smoothstep, ease } from "./helpers";
+export { DEFAULT_PALETTE, type Palette } from "./palette";
+export { muxAnimatedWebP } from "./vendor/webp_anim";
+export type { FigSpec, FigCtx, Frame, Keyframe, NodePlace, FigPos, FigEntry, Step } from "./types";
+
+/** Controller returned by {@link createFigure}. Owns the canvas + buttons it
+ *  created inside `mount`; call `dispose()` to tear everything down. */
+export type FigureController = {
+  /** Tear down the renderer, controls, observers, DOM, and all retained objects. */
+  dispose(): void;
+  /** Resume playback (un-pause). No-op while an export is running. */
+  play(): void;
+  /** Pause playback. No-op while an export is running. */
+  pause(): void;
+  /** Restart from t=0 and play. No-op while an export is running. */
+  replay(): void;
+  /** True when the user paused the animation (or it has not started). */
+  isPaused(): boolean;
+  /** Export the animation as an AV1 WebM (60 fps) via WebCodecs + mediabunny. */
+  downloadWebM(): void;
+  /** Export the animation as an animated WebP (15 fps) via canvas.toBlob. */
+  downloadWebP(): void;
+};
+
 // ---------------------------------------------------------------------------
-// Immediate-mode figure framework (Dear ImGui-flavored): <Figure spec={...} />.
-// The figure CODE is the state machine -- each draw call is issued every frame
-// with its own alpha (IM_COL32-style); the framework retains three.js objects
-// by `key` (create/update/drop across frames) and owns all playback. No
-// "build" phase: the app (the spec's draw closure) owns its scene data. A
-// legacy timeline engine (setupAnimEngine) is also exported for figures that
-// have not yet migrated to the immediate-mode model.
+// createFigure: the immediate-mode figure engine (Dear ImGui-flavored). The
+// figure CODE is the state machine -- each draw call is issued every frame with
+// its own alpha (IM_COL32-style); the framework retains three.js objects by
+// `key` (create/update/drop across frames) and owns all playback. No "build"
+// phase: the app (the spec's draw closure) owns its scene data.
 // ---------------------------------------------------------------------------
 
-export function Figure({ spec, palette }: { spec: FigSpec; palette?: Palette }) {
-  const mountRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const mount = mountRef.current;
-    if (!mount) return;
+export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette?: Palette }): FigureController {
     const { keyframe_timestamps: kfs, camera: camSpec, draw } = spec;
-    const P = palette ?? DEFAULT_PALETTE;
+    const P = opts?.palette ?? DEFAULT_PALETTE;
 
     const SZ = mount.clientWidth || 480;
     const FR = camSpec.frustum;
@@ -599,7 +630,7 @@ export function Figure({ spec, palette }: { spec: FigSpec; palette?: Palette }) 
     });
     ro.observe(mount);
 
-    return () => {
+    const dispose = () => {
       disposed = true;
       recording = null; capturing = false;
       cancelAnimationFrame(raf);
@@ -620,8 +651,14 @@ export function Figure({ spec, palette }: { spec: FigSpec; palette?: Palette }) 
       renderer.dispose();
       if (renderer.domElement.parentNode === mount) mount.removeChild(renderer.domElement);
     };
-  }, [spec, palette]);
 
-  return <div ref={mountRef} style={{ position: "relative", width: "100%", maxWidth: 480, aspectRatio: "1 / 1", margin: "0 auto" }} />;
+    return {
+      dispose,
+      play: () => { if (recording) return; userPaused = false; setPauseIcon(); },
+      pause: () => { if (recording) return; userPaused = true; setPauseIcon(); },
+      replay: restart,
+      isPaused: () => userPaused,
+      downloadWebM: () => { startDownloadWebCodecs("av1", 60, ".webm").catch(() => {}); },
+      downloadWebP: () => { startDownloadWebP().catch(() => {}); },
+    };
 }
-

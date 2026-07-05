@@ -1,7 +1,7 @@
 {
   "name": "anima-esm",
-  "version": "0.1.0",
-  "description": "Immediate-mode 3D animation framework (Dear-ImGui-style <Figure>), with WebM/WebP export",
+  "version": "0.2.0",
+  "description": "Immediate-mode 3D animation framework: vanilla core (createFigure) + optional React wrapper, with WebM/WebP export",
   "type": "module",
   "license": "MIT",
   "sideEffects": false,
@@ -14,8 +14,14 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/anima.min.mjs"
     },
+    "./react": {
+      "types": "./dist/react-index.d.ts",
+      "import": "./dist/anima-react.min.mjs"
+    },
     "./anima.min.mjs": "./dist/anima.min.mjs",
     "./anima.debug.mjs": "./dist/anima.debug.mjs",
+    "./anima-react.min.mjs": "./dist/anima-react.min.mjs",
+    "./anima-react.debug.mjs": "./dist/anima-react.debug.mjs",
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -25,9 +31,11 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
-    "react": "^18",
-    "react-dom": "^18",
     "three": ">=0.160"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "react-dom": { "optional": true }
   },
   "devDependencies": {
     "@types/react": "^18.3.0",
