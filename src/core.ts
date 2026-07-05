@@ -70,10 +70,6 @@ const LABEL_DEFAULT_BACKDROP = "#000000";
 const LABEL_DEFAULT_SIZE = 0.14;
 const LABEL_BACKDROP_ALPHA = 0.6;
 
-// Vec3 (0..1) -> "#rrggbb" for canvas fillStyle + the label cache key.
-const hexOf = (v: Vec3): string =>
-  "#" + [0, 1, 2].map((i) => Math.round(v[i] * 255).toString(16).padStart(2, "0")).join("");
-
 // A baked base mesh shared by every instance of a primitive: a unit sphere
 // (`sphere` scales + translates it) and a unit cylinder (`bar` scales, rotates
 // +Y onto a->b, translates it). Wound CCW with front faces outward so back-face
@@ -165,11 +161,14 @@ export function createFigure(
     controls.setTarget(camSpec.target);
     controls.update();
 
-    // in-canvas caption: a small NDC quad textured with a CanvasTexture, drawn
-    // in a second (HUD) pass with an identity projection so its on-canvas size
-    // is constant regardless of the orbit dolly. The 2D canvas redraws only
-    // when the caption text changes (no per-frame texture re-upload). The
-    // caption renders INTO the WebGL canvas so the WebM/WebP export keeps it.
+    // in-canvas caption: a small NDC quad drawn in a second (HUD) pass with an
+    // identity projection so its on-canvas size is constant regardless of the
+    // orbit dolly. The caption is TWO white alpha stencils — a rounded-rect
+    // pill + the multi-line text — colored in the shader (pill = black @ 0.6,
+    // text = ink), so the alpha is the unmodified canvas AA (pixel-perfect). The
+    // 2D canvases redraw only when the caption text changes (no per-frame
+    // texture re-upload). The caption renders INTO the WebGL canvas so the
+    // WebM/WebP export keeps it.
     const roundRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
       ctx.beginPath();
       ctx.moveTo(x + r, y);
@@ -179,62 +178,69 @@ export function createFigure(
       ctx.arcTo(x, y, x + w, y, r);
       ctx.closePath();
     };
+    // Caption stencil canvases + GL textures (owned here, not in the renderer).
+    const capTextCanvas = document.createElement("canvas");
+    capTextCanvas.width = 1024; capTextCanvas.height = 180;
+    const capPillCanvas = document.createElement("canvas");
+    capPillCanvas.width = 1024; capPillCanvas.height = 180;
+    const capTextTex = glr.createCanvasTexture(capTextCanvas);
+    const capPillTex = glr.createCanvasTexture(capPillCanvas);
+    let capTextDirty = true, capPillDirty = true;
     const drawCaption = (text: string) => {
-      const c = glr.capCanvas.getContext("2d")!;
-      c.clearRect(0, 0, 1024, 180);
-      if (!text) { glr.capDirty = true; return; } // transparent: no pill, no caption.
-      c.font = "600 36px -apple-system, 'Segoe UI', Roboto, sans-serif";
-      c.textAlign = "center";
-      c.textBaseline = "middle";
+      const ct = capTextCanvas.getContext("2d")!;
+      const cp = capPillCanvas.getContext("2d")!;
+      ct.clearRect(0, 0, 1024, 180);
+      cp.clearRect(0, 0, 1024, 180);
+      if (!text) { capTextDirty = capPillDirty = true; return; } // transparent: no pill, no text.
+      ct.font = "600 36px -apple-system, 'Segoe UI', Roboto, sans-serif";
+      ct.textAlign = "center";
+      ct.textBaseline = "middle";
       const maxTextW = 900;
       const words = text.split(" ");
       const lines: string[] = [];
       let line = "";
       for (const w of words) {
         const cand = line ? line + " " + w : w;
-        if (c.measureText(cand).width > maxTextW && line) { lines.push(line); line = w; }
+        if (ct.measureText(cand).width > maxTextW && line) { lines.push(line); line = w; }
         else line = cand;
       }
       if (line) lines.push(line);
       const lineH = 44, padX = 28, padY = 18;
       let widest = 0;
-      for (const ln of lines) widest = Math.max(widest, c.measureText(ln).width);
+      for (const ln of lines) widest = Math.max(widest, ct.measureText(ln).width);
       const boxW = widest + padX * 2, boxH = lines.length * lineH + padY * 2;
       const bx = (1024 - boxW) / 2, by = (180 - boxH) / 2;
-      c.fillStyle = "#00000099"; // --color-bg-modal-overlay (Meshy design system)
-      roundRect(c, bx, by, boxW, boxH, 14);
-      c.fill(); // tinted backdrop only, no border (YouTube-style pill).
-      c.fillStyle = P.ink;
+      // Pill: white rounded-rect alpha stencil (colored black @ 0.6 in shader).
+      cp.fillStyle = "#ffffff";
+      roundRect(cp, bx, by, boxW, boxH, 14);
+      cp.fill();
+      // Text: white multi-line alpha stencil (colored ink in shader).
+      ct.fillStyle = "#ffffff";
       for (let i = 0; i < lines.length; i++)
-        c.fillText(lines[i], 1024 / 2, by + padY + lineH / 2 + i * lineH);
-      glr.capDirty = true;
+        ct.fillText(lines[i], 1024 / 2, by + padY + lineH / 2 + i * lineH);
+      capTextDirty = capPillDirty = true;
     };
-    // Paint a rounded-rect backdrop pill + centered bold text onto a CACHED
-    // label canvas (one per unique content key). The backdrop alpha is fixed
-    // (~0.6, LABEL_BACKDROP_ALPHA); the overall sprite opacity is driven
-    // per-frame by the per-vertex color alpha (opts.alpha) — the cached GL
-    // texture is NOT re-uploaded per frame.
-    const paintLabel = (canvas: HTMLCanvasElement, text: string, color: Vec3, backdrop: boolean, backdropColor: Vec3) => {
+    // Paint the label text as a WHITE alpha stencil (RGB=1, A=glyph AA mask).
+    // The text COLOR is applied in the shader via the per-vertex color (vCol),
+    // so recoloring needs no re-bake and the cache is keyed by text alone. The
+    // backdrop pill is a separate quad (a shared rounded-rect alpha stencil),
+    // not baked here.
+    const paintLabel = (canvas: HTMLCanvasElement, text: string) => {
       const c = canvas.getContext("2d")!;
       c.clearRect(0, 0, canvas.width, canvas.height);
       const S = canvas.width;
-      if (backdrop) {
-        c.globalAlpha = LABEL_BACKDROP_ALPHA;
-        c.fillStyle = hexOf(backdropColor);
-        roundRect(c, 0, 0, S, S, S * 0.1);
-        c.fill();
-        c.globalAlpha = 1;
-      }
-      c.fillStyle = hexOf(color);
+      c.fillStyle = "#ffffff";
       c.font = "700 " + Math.round(S * 0.55) + "px -apple-system,'Segoe UI',Roboto,sans-serif";
       c.textAlign = "center";
       c.textBaseline = "middle";
       c.fillText(text, S / 2, S / 2);
     };
-    // The caption HUD quad: a 2-tri NDC quad sampling capTex. center (0,-0.82),
-    // half-extents (0.85, 0.15) — the same pose/scale as the old three Sprite
-    // (pos (0,-0.82), scale (1.7,0.30)) under the identity-mapped HUD camera.
-    // v flipped on upload, so canvas-top maps to NDC-top (higher y).
+    // The caption HUD: two 2-tri NDC quads sampling the pill + text alpha
+    // stencils, colored in the shader (pill = black @ 0.6, text = ink). center
+    // (0,-0.82), half-extents (0.85, 0.15) — the same pose/scale as the old
+    // three Sprite under the identity-mapped HUD camera. v flipped on upload, so
+    // canvas-top maps to NDC-top (higher y). The pill is emitted before the text
+    // so it paints behind it (depthTest off → call order = paint order).
     const pushCaptionQuad = () => {
       const x0 = -0.85, x1 = 0.85, y0 = -0.67, y1 = -0.97; // left/right, top/bottom
       const cs: Vec3[] = [
@@ -242,19 +248,28 @@ export function createFigure(
         [x0, y0, 0], [x1, y1, 0], [x0, y1, 0],
       ];
       const uvs = [0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0]; // top edge v=1, bottom v=0
-      const colPacked = packCol(1, 1, 1, 1);
-      glr.ensureVCap(6);
+      const ink = col(P.ink);
+      const pillCol = packCol(0, 0, 0, 0.6);          // black pill @ 0.6
+      const textCol = packCol(ink[0], ink[1], ink[2], 1);
+      const cols = [pillCol, textCol];
+      const texs = [capPillTex, capTextTex];
+      glr.ensureVCap(12);
       const vbase = glr.vlen;
       const vf = glr.vtxF, vu = glr.vtxU;
-      for (let k = 0; k < 6; k++) {
-        const w = (vbase + k) * 6;
-        vf[w] = cs[k][0]; vf[w + 1] = cs[k][1]; vf[w + 2] = cs[k][2];
-        vf[w + 3] = uvs[k * 2]; vf[w + 4] = uvs[k * 2 + 1];
-        vu[w + 5] = colPacked;
+      for (let pass = 0; pass < 2; pass++) {
+        const colPacked = cols[pass];
+        for (let k = 0; k < 6; k++) {
+          const w = (vbase + pass * 6 + k) * 6;
+          vf[w] = cs[k][0]; vf[w + 1] = cs[k][1]; vf[w + 2] = cs[k][2];
+          vf[w + 3] = uvs[k * 2]; vf[w + 4] = uvs[k * 2 + 1];
+          vu[w + 5] = colPacked;
+        }
       }
-      glr.vlen += 6;
-      glr.add({ mode: TRI, tex: glr.capTex, depthTest: false, depthWrite: false, cull: false,
+      glr.vlen += 12;
+      glr.add({ mode: TRI, tex: texs[0], depthTest: false, depthWrite: false,
         idxBase: 0, idxCount: 0, vtxBase: vbase, vtxCount: 6, cx: 0, cy: 0, cz: 0 });
+      glr.add({ mode: TRI, tex: texs[1], depthTest: false, depthWrite: false,
+        idxBase: 0, idxCount: 0, vtxBase: vbase + 6, vtxCount: 6, cx: 0, cy: 0, cz: 0 });
     };
     let lastCap = "";
     drawCaption(kfs[0]?.caption ?? "");
@@ -272,11 +287,25 @@ export function createFigure(
     // The stack unwinds back to the bottom after each draw() since the scope
     // methods push/pop synchronously.
     const modeStack: Array<{ depthTest: boolean; collect: Rec[] | null }> = [{ depthTest: false, collect: null }];
-    // label content cache: the ONLY internal retention — content-addressed
-    // (text + color hex + backdrop + backdropColor hex), NOT keyed by a user
-    // string. The GL texture is created once per unique content and reused
-    // across frames; per-frame opacity comes from the per-vertex color alpha.
+    // label text cache: the ONLY internal retention — keyed by text alone (the
+    // text is a white alpha stencil; color is applied in the shader, so the
+    // same string in different colors shares one texture). The GL texture is
+    // created once per unique string and reused across frames; per-frame
+    // opacity comes from the per-vertex color alpha.
     const labelCache = new Map<string, { canvas: HTMLCanvasElement; tex: WebGLTexture }>();
+    // Shared rounded-rect alpha-stencil texture for every label's backdrop pill
+    // (white RGB, A = rounded-rect mask). Colored per-label in the shader via
+    // the per-vertex color (vCol = backdropColor * 0.6 * alpha). One texture,
+    // reused by all labels.
+    const pillCanvas = document.createElement("canvas");
+    pillCanvas.width = 256; pillCanvas.height = 256;
+    {
+      const pc = pillCanvas.getContext("2d")!;
+      pc.fillStyle = "#ffffff";
+      roundRect(pc, 0, 0, 256, 256, 256 * 0.1);
+      pc.fill();
+    }
+    const pillTex = glr.createCanvasTexture(pillCanvas);
 
     // emit: route a record to the current render target. Walk the modeStack
     // from the top down; the first entry whose `collect` is non-null is the
@@ -321,7 +350,7 @@ export function createFigure(
         const idx = glr.idxArr;
         for (let k = 0; k < SPHERE.idx.length; k++) idx[glr.ilen + k] = vbase + SPHERE.idx[k];
         glr.ilen += SPHERE.idx.length;
-        emit({ mode: TRI, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true, cull: true,
+        emit({ mode: TRI, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true,
           idxBase, idxCount: SPHERE.idx.length, vtxBase: 0, vtxCount: 0, cx: pos[0], cy: pos[1], cz: pos[2] });
         return pos;
       },
@@ -339,7 +368,7 @@ export function createFigure(
         vf[w] = b[0]; vf[w + 1] = b[1]; vf[w + 2] = b[2]; vf[w + 3] = 0; vf[w + 4] = 0; vu[w + 5] = colPacked;
         glr.vlen += 2;
         const cx = (a[0] + b[0]) * 0.5, cy = (a[1] + b[1]) * 0.5, cz = (a[2] + b[2]) * 0.5;
-        emit({ mode: LINES, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true, cull: false,
+        emit({ mode: LINES, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true,
           idxBase: 0, idxCount: 0, vtxBase: vbase, vtxCount: 2, cx, cy, cz });
         return a;
       },
@@ -374,7 +403,7 @@ export function createFigure(
         const idx = glr.idxArr;
         for (let k = 0; k < CYL.idx.length; k++) idx[glr.ilen + k] = vbase + CYL.idx[k];
         glr.ilen += CYL.idx.length;
-        emit({ mode: TRI, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true, cull: true,
+        emit({ mode: TRI, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true,
           idxBase, idxCount: CYL.idx.length, vtxBase: 0, vtxCount: 0, cx: mid[0], cy: mid[1], cz: mid[2] });
         return a;
       },
@@ -383,7 +412,7 @@ export function createFigure(
         if (a <= 0.001) return verts[0];
         const cc = col(color);
         const colPacked = packCol(cc[0], cc[1], cc[2], a);
-        // 2 tris (0,1,2)+(0,2,3), DoubleSide (no cull). uv per corner.
+        // 2 tris (0,1,2)+(0,2,3), double-sided. uv per corner.
         const order = [0, 1, 2, 0, 2, 3];
         const uvs = [0, 0, 1, 0, 1, 1, 0, 1];
         glr.ensureVCap(6);
@@ -399,7 +428,7 @@ export function createFigure(
         const cx = (verts[0][0] + verts[1][0] + verts[2][0] + verts[3][0]) * 0.25;
         const cy = (verts[0][1] + verts[1][1] + verts[2][1] + verts[3][1]) * 0.25;
         const cz = (verts[0][2] + verts[1][2] + verts[2][2] + verts[3][2]) * 0.25;
-        emit({ mode: TRI, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true, cull: false,
+        emit({ mode: TRI, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true,
           idxBase: 0, idxCount: 0, vtxBase: vbase, vtxCount: 6, cx, cy, cz });
         return verts[0];
       },
@@ -424,7 +453,7 @@ export function createFigure(
         }
         glr.vlen += n * 3;
         const inv = 1 / (n * 3);
-        emit({ mode: TRI, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true, cull: false,
+        emit({ mode: TRI, tex: glr.whiteTex, depthTest: topDepthTest(), depthWrite: true,
           idxBase: 0, idxCount: 0, vtxBase: vbase, vtxCount: n * 3, cx: ax * inv, cy: ay * inv, cz: az * inv });
         return tris[0][0];
       },
@@ -435,12 +464,15 @@ export function createFigure(
         const size = opts?.size ?? LABEL_DEFAULT_SIZE;
         const a = clamp01(opts?.alpha ?? 1);
         if (a <= 0.001) return pos;
-        const key = text + "\u0000" + hexOf(color) + "\u0000" + (backdrop ? 1 : 0) + "\u0000" + hexOf(backdropColor);
+        // Text is a white alpha stencil keyed by text alone (color is a shader
+        // concern, applied via vCol), so the same string in different colors
+        // shares one texture.
+        const key = text;
         let c = labelCache.get(key);
         if (!c) {
           const canvas = document.createElement("canvas");
           canvas.width = 256; canvas.height = 256;
-          paintLabel(canvas, text, color, backdrop, backdropColor);
+          paintLabel(canvas, text);
           const tex = glr.createCanvasTexture(canvas);
           c = { canvas, tex };
           labelCache.set(key, c);
@@ -448,7 +480,6 @@ export function createFigure(
         // Billboard quad around `pos`, screen-fixed size = size/zoom, facing the
         // camera (right/up from the view matrix). Labels render on top: depthTest
         // + depthWrite forced off regardless of the surrounding depth mode.
-        const colPacked = packCol(1, 1, 1, a);
         const h = size / (2 * controls.zoom);
         const rx = controls.right[0], ry = controls.right[1], rz = controls.right[2];
         const ux = controls.up[0], uy = controls.up[1], uz = controls.up[2];
@@ -458,18 +489,39 @@ export function createFigure(
         const c3: Vec3 = [pos[0] - rx * h + ux * h, pos[1] - ry * h + uy * h, pos[2] - rz * h + uz * h];
         const cs = [c0, c1, c2, c0, c2, c3];
         const uvs = [0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1]; // bottom v=0, top v=1
+        // Backdrop pill: a separate quad sampling the shared rounded-rect alpha
+        // stencil, colored backdropColor @ 0.6*alpha. Emitted before the text so
+        // it paints behind it (labels are depthTest off → call order = paint order).
+        if (backdrop) {
+          const bp = packCol(backdropColor[0], backdropColor[1], backdropColor[2], a * LABEL_BACKDROP_ALPHA);
+          glr.ensureVCap(6);
+          const vb = glr.vlen;
+          const vf = glr.vtxF, vu = glr.vtxU;
+          for (let k = 0; k < 6; k++) {
+            const w = (vb + k) * 6;
+            vf[w] = cs[k][0]; vf[w + 1] = cs[k][1]; vf[w + 2] = cs[k][2];
+            vf[w + 3] = uvs[k * 2]; vf[w + 4] = uvs[k * 2 + 1];
+            vu[w + 5] = bp;
+          }
+          glr.vlen += 6;
+          emit({ mode: TRI, tex: pillTex, depthTest: false, depthWrite: false,
+            idxBase: 0, idxCount: 0, vtxBase: vb, vtxCount: 6, cx: pos[0], cy: pos[1], cz: pos[2] });
+        }
+        // Text: white alpha stencil colored by `color` @ alpha (vCol * texel =
+        // (color, alpha * glyphAA) since the stencil's RGB is white).
+        const tp = packCol(color[0], color[1], color[2], a);
         glr.ensureVCap(6);
-        const vbase = glr.vlen;
+        const vt = glr.vlen;
         const vf = glr.vtxF, vu = glr.vtxU;
         for (let k = 0; k < 6; k++) {
-          const w = (vbase + k) * 6;
+          const w = (vt + k) * 6;
           vf[w] = cs[k][0]; vf[w + 1] = cs[k][1]; vf[w + 2] = cs[k][2];
           vf[w + 3] = uvs[k * 2]; vf[w + 4] = uvs[k * 2 + 1];
-          vu[w + 5] = colPacked;
+          vu[w + 5] = tp;
         }
         glr.vlen += 6;
-        emit({ mode: TRI, tex: c.tex, depthTest: false, depthWrite: false, cull: false,
-          idxBase: 0, idxCount: 0, vtxBase: vbase, vtxCount: 6, cx: pos[0], cy: pos[1], cz: pos[2] });
+        emit({ mode: TRI, tex: c.tex, depthTest: false, depthWrite: false,
+          idxBase: 0, idxCount: 0, vtxBase: vt, vtxCount: 6, cx: pos[0], cy: pos[1], cz: pos[2] });
         return pos;
       },
       // depthSorted: primitives issued inside `fn` are collected into a bucket
@@ -582,7 +634,8 @@ export function createFigure(
       if (cap !== lastCap) { drawCaption(cap); lastCap = cap; }
       pushCaptionQuad();
       pfill.style.width = (total > 0 ? clamp01(tt / total) * 100 : 0) + "%";
-      glr.uploadTextures();
+      if (capTextDirty) { glr.updateCanvasTexture(capTextTex, capTextCanvas); capTextDirty = false; }
+      if (capPillDirty) { glr.updateCanvasTexture(capPillTex, capPillCanvas); capPillDirty = false; }
       glr.upload();
       // two-pass overlay — main scene (mvp) then fixed HUD caption (identity
       // projection) on top; the HUD pass does not clear, so it draws over the
@@ -776,6 +829,9 @@ export function createFigure(
       downloadBtn.removeEventListener("mouseleave", startHide);
       menu.removeEventListener("mouseenter", cancelHide);
       menu.removeEventListener("mouseleave", startHide);
+      glr.gl.deleteTexture(pillTex);
+      glr.gl.deleteTexture(capTextTex);
+      glr.gl.deleteTexture(capPillTex);
       for (const c of labelCache.values()) glr.gl.deleteTexture(c.tex);
       labelCache.clear();
       pbar.remove(); replay.remove(); pauseBtn.remove(); downloadBtn.remove(); menu.remove();

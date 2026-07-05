@@ -94,9 +94,10 @@ export class OrbitCam {
     }
     this.pos = sphericalPos(this.target, this.radius, this.phi, this.theta);
     this.view = lookAt(this.pos, this.target, [0, 1, 0]);
-    // Camera right / up = columns 0 / 1 of the view matrix (world-space basis).
-    this.right = [this.view[0], this.view[1], this.view[2]];
-    this.up = [this.view[4], this.view[5], this.view[6]];
+    // Camera right / up = rows 0 / 1 of the column-major view matrix. (The view
+    // matrix stores columns contiguously, so row r = elements [r, r+4, r+8].)
+    this.right = [this.view[0], this.view[4], this.view[8]];
+    this.up = [this.view[1], this.view[5], this.view[9]];
     if (this.enableDamping) {
       this.zoom += (this.zoomT - this.zoom) * this.dampingFactor;
     } else {

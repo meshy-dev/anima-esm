@@ -30,9 +30,6 @@ export type Rec = {
   depthTest: boolean;
   /** Write depth (gl.depthMask). Labels / caption disable this. */
   depthWrite: boolean;
-  /** Cull back faces (gl.CULL_FACE, front = CCW). Solid closed primitives
-   *  (sphere, bar) set this (FrontSide); flat / open primitives disable it. */
-  cull: boolean;
   // Indexed (TRIANGLES, sphere/bar/quad): both set, drawElements.
   idxBase: number;
   idxCount: number;
@@ -135,11 +132,6 @@ export class GLRenderer {
   private clearB = 0;
   private clearA = 0;
 
-  // Caption texture (a CanvasTexture uploaded when dirty).
-  capCanvas: HTMLCanvasElement;
-  capTex: WebGLTexture;
-  capDirty = true;
-
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const gl = canvas.getContext("webgl2", {
@@ -178,11 +170,6 @@ export class GLRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    this.capCanvas = document.createElement("canvas");
-    this.capCanvas.width = 1024;
-    this.capCanvas.height = 180;
-    this.capTex = this.createCanvasTexture(this.capCanvas);
 
     this.growV(1024);
     this.growI(4096);
@@ -238,17 +225,8 @@ export class GLRenderer {
     this.clearR = r; this.clearG = g; this.clearB = b; this.clearA = a;
   }
 
-  /** Upload dirty CanvasTextures (the caption). Called once per frame after
-   *  all vertices are written, before {@link drawRange}. */
-  uploadTextures(): void {
-    if (this.capDirty) {
-      this.updateCanvasTexture(this.capTex, this.capCanvas);
-      this.capDirty = false;
-    }
-  }
-
   /** Upload the VBO + IBO once for the frame. Call after all verts/indices are
-   *  written (and after {@link uploadTextures}). */
+   *  written (and after any dirty CanvasTextures are re-uploaded). */
   upload(): void {
     const gl = this.gl;
     gl.bindVertexArray(this.vao);
@@ -274,12 +252,18 @@ export class GLRenderer {
     let bits = 0;
     if (clearCol) bits |= gl.COLOR_BUFFER_BIT;
     if (clearDep) bits |= gl.DEPTH_BUFFER_BIT;
+    // The HUD caption pass leaves depthMask=false; glClear(DEPTH_BUFFER_BIT)
+    // is gated by the depth write-mask, so force depthMask=true BEFORE the
+    // clear — otherwise the depth buffer is never cleared and stale depth
+    // from the previous frame occludes the animating geometry.
+    gl.depthMask(true);
     if (bits) gl.clear(bits);
 
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthFunc(gl.LEQUAL);
     gl.frontFace(gl.CCW);
+    gl.disable(gl.CULL_FACE); // culling disabled: billboards + winding-robust
     gl.bindVertexArray(this.vao);
 
     let tex: WebGLTexture | null = null;
@@ -288,7 +272,6 @@ export class GLRenderer {
       if (r.tex !== tex) { gl.bindTexture(gl.TEXTURE_2D, r.tex); tex = r.tex; }
       gl.depthMask(r.depthWrite);
       if (r.depthTest) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
-      if (r.cull) { gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); } else gl.disable(gl.CULL_FACE);
       if (r.idxCount > 0)
         gl.drawElements(r.mode, r.idxCount, gl.UNSIGNED_INT, r.idxBase * 4);
       else
@@ -334,7 +317,6 @@ export class GLRenderer {
     gl.deleteBuffer(this.vbo);
     gl.deleteBuffer(this.ibo);
     gl.deleteTexture(this.whiteTex);
-    gl.deleteTexture(this.capTex);
     if (lose) lose.loseContext();
   }
 }
