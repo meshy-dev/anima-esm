@@ -36,6 +36,22 @@ export const ortho = (l: number, r: number, b: number, t: number, n: number, f: 
   return o;
 };
 
+/** Perspective projection (column-major, glTF). `fovy` is the full vertical
+ *  field of view in radians, `aspect` = width/height. Maps the right-handed
+ *  view space (camera looks down -Z; near at view z=-n, far at view z=-f) onto
+ *  NDC [-1..1] with near -> NDC.z=-1, far -> +1 — the same depth convention as
+ *  `ortho`, so LEQUAL keeps the nearest surface. */
+export const perspective = (fovy: number, aspect: number, n: number, f: number): Mat4 => {
+  const o = new Float32Array(16);
+  const t = 1 / Math.tan(fovy / 2);
+  o[0] = t / aspect;
+  o[5] = t;
+  o[10] = -(f + n) / (f - n);
+  o[11] = -1;
+  o[14] = -2 * f * n / (f - n);
+  return o;
+};
+
 /** World->camera view matrix (column-major) from `lookAt(eye, target, up)`.
  *  Camera looks down -Z; the +Z basis is normalize(eye - target). */
 export const lookAt = (eye: Vec3, target: Vec3, up: Vec3): Mat4 => {

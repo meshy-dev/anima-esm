@@ -22,7 +22,7 @@
 
 import { GLRenderer, packCol, type Rec } from "./gl";
 import { OrbitCam } from "./orbit";
-import { mat4, ortho, mul, rotYTo, vdist2 } from "./mat";
+import { mat4, ortho, perspective, mul, rotYTo, vdist2 } from "./mat";
 import { clamp01, col, type Vec3 } from "./helpers";
 import { DEFAULT_PALETTE, type Palette } from "./palette";
 import type { FigCtx, FigSpec, Frame } from "./types";
@@ -141,7 +141,12 @@ export function createFigure(
     const endHold = opts?.loop !== false && endHoldMs0 > 0 && Number.isFinite(endHoldMs0) ? endHoldMs0 / 1000 : Infinity;
 
     const SZ = mount.clientWidth || 480;
-    const FR = camSpec.frustum;
+    // Camera mode: `fov` (deg) -> perspective; `frustum` only -> ortho; neither
+    // -> default 15° perspective. For perspective, `frustum` (if given) is the
+    // framing half-extent at the target (sets orbit distance).
+    const isPersp = camSpec.fov !== undefined || camSpec.frustum === undefined;
+    const FOV = (camSpec.fov ?? 15) * Math.PI / 180; // radians, full vertical FOV (default 15 deg)
+    const FR = camSpec.frustum ?? 0; // half-extent: ortho frustum / perspective framing
 
     // ---- renderer + canvas + orbit camera (no three.js) ----
     const canvas = document.createElement("canvas");
@@ -154,7 +159,7 @@ export function createFigure(
     const IDENTITY = mat4();
     const dpr = Math.min(window.devicePixelRatio, 2);
     glr.resize(SZ, SZ, dpr);
-    const controls = new OrbitCam(canvas, camSpec.pos, camSpec.target, 1);
+    const controls = new OrbitCam(canvas, camSpec.pos, camSpec.target, { perspective: isPersp, fov: FOV, frustum: FR });
     controls.enableDamping = true; controls.dampingFactor = 0.08; controls.enablePan = false;
     controls.minZoom = 0.5; controls.maxZoom = 4;
     controls.autoRotate = true; controls.autoRotateSpeed = 0.5;
@@ -485,7 +490,9 @@ export function createFigure(
         // Billboard quad around `pos`, screen-fixed size = size/zoom, facing the
         // camera (right/up from the view matrix). Labels render on top: depthTest
         // + depthWrite forced off regardless of the surrounding depth mode.
-        const h = size / (2 * controls.zoom);
+        const h = controls.perspective
+          ? (size * Math.hypot(pos[0] - controls.pos[0], pos[1] - controls.pos[1], pos[2] - controls.pos[2])) / (2 * controls.radius)
+          : size / (2 * controls.zoom);
         const rx = controls.right[0], ry = controls.right[1], rz = controls.right[2];
         const ux = controls.up[0], uy = controls.up[1], uz = controls.up[2];
         const c0: Vec3 = [pos[0] - rx * h - ux * h, pos[1] - ry * h - uy * h, pos[2] - rz * h - uz * h];
@@ -653,8 +660,9 @@ export function createFigure(
       // two-pass overlay — main scene (mvp) then fixed HUD caption (identity
       // projection) on top; the HUD pass does not clear, so it draws over the
       // main pass without wiping it.
-      const fx = FR / controls.zoom;
-      const proj = ortho(-fx, fx, -fx, fx, 0.1, 100);
+      const proj = controls.perspective
+        ? perspective(controls.fov, glr.canvas.width / glr.canvas.height, 0.1, 100)
+        : ortho(-FR / controls.zoom, FR / controls.zoom, -FR / controls.zoom, FR / controls.zoom, 0.1, 100);
       const mvp = mul(proj, controls.view);
       glr.drawRange(mvp, 0, sceneEnd, true, true);
       glr.drawRange(IDENTITY, sceneEnd, glr.records.length, false, false);
@@ -689,6 +697,7 @@ export function createFigure(
       if (total <= 0) return;
       // opaque dark bg for the export; restored on finish/error.
       setOpaqueClear(true);
+      glr.resize(SZ, SZ, 1); // cap export at CSS size (dpr 1): 4x fewer pixels -> much faster AV1 encode
       recording = "webcodecs";
       capturing = true;
       downloadBtn.textContent = "\u23fa";
@@ -696,7 +705,7 @@ export function createFigure(
       const N = Math.ceil(total * fps);
       const { Output, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH } = await import("anima-esm/muxers");
       const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() });
-      const videoSource = new CanvasSource(glr.canvas, { codec, bitrate: QUALITY_HIGH, keyFrameInterval: 1 });
+      const videoSource = new CanvasSource(glr.canvas, { codec, bitrate: QUALITY_HIGH, keyFrameInterval: 5, latencyMode: "realtime", hardwareAcceleration: "prefer-hardware" });
       output.addVideoTrack(videoSource, { frameRate: fps });
       try {
         await output.start();
@@ -730,6 +739,7 @@ export function createFigure(
       } finally {
         if (disposed) return;
         setOpaqueClear(false);
+        glr.resize(SZ, SZ, dpr); // restore live dpr
         recording = null;
         capturing = false;
         downloadBtn.textContent = "\u2b07";

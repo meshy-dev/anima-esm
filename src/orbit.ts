@@ -26,7 +26,9 @@ export class OrbitCam {
 
   private theta = 0; private phi = 0;     // current (damped) angles
   private thetaT = 0; private phiT = 0;   // target angles (drag/auto-rotate write here)
-  private radius = 1;                     // orbit radius (orthographic: view-independent)
+  radius = 1;                          // orbit radius (perspective dolly / orthographic: view-independent)
+  private radiusT = 1;                  // dolly target for perspective
+  minRadius = 0.1; maxRadius = 100;     // perspective dolly clamp
   private zoomT: number;                  // target dolly
   private dragging = false;
   private px = 0; private py = 0;
@@ -43,12 +45,17 @@ export class OrbitCam {
   /** Camera right / up basis vectors in world space (unit), for billboarding. */
   right: Vec3 = [1, 0, 0];
   up: Vec3 = [0, 1, 0];
+  perspective = false;                  // perspective vs orthographic projection
+  fov = 0;                              // radians, full vertical FOV
+  frustum = 0;                          // half-extent, used as the framing for perspective and as the ortho frustum
 
-  constructor(domElement: HTMLElement, pos: Vec3, target: Vec3, zoom = 1) {
+  constructor(domElement: HTMLElement, pos: Vec3, target: Vec3, opts: { perspective?: boolean; fov?: number; frustum?: number } = {}) {
     this.domElement = domElement;
     this.target = [target[0], target[1], target[2]];
-    this.zoomT = zoom;
-    this.zoom = zoom;
+    this.perspective = !!opts.perspective;
+    this.fov = opts.fov ?? 0;
+    this.frustum = opts.frustum ?? 0;
+    this.zoomT = 1; this.zoom = 1;      // ortho dolly default
     domElement.style.cursor = "grab";
     domElement.addEventListener("pointerdown", this.onDown);
     domElement.addEventListener("wheel", this.onWheel, { passive: false });
@@ -57,7 +64,9 @@ export class OrbitCam {
     // Seed the spherical state from the initial position relative to the
     // target so the first update() matches the spec's camera pose.
     const off = [pos[0] - target[0], pos[1] - target[1], pos[2] - target[2]] as Vec3;
-    this.radius = Math.hypot(off[0], off[1], off[2]) || 1;
+    const dist = Math.hypot(off[0], off[1], off[2]) || 1;
+    this.radius = (this.perspective && this.frustum > 0) ? this.frustum / Math.tan(this.fov / 2) : dist;
+    this.radiusT = this.radius; this.minRadius = this.radius * 0.25; this.maxRadius = this.radius * 4;
     this.phi = Math.acos(Math.max(-1, Math.min(1, off[1] / this.radius)));
     this.theta = Math.atan2(off[2], off[0]);
     this.thetaT = this.theta; this.phiT = this.phi;
@@ -81,7 +90,11 @@ export class OrbitCam {
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
     const f = Math.pow(1.1, -e.deltaY * 0.01);
-    this.zoomT = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoomT * f));
+    if (this.perspective) {
+      this.radiusT = Math.max(this.minRadius, Math.min(this.maxRadius, this.radiusT * f));
+    } else {
+      this.zoomT = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoomT * f));
+    }
   };
 
   update = () => {
@@ -89,8 +102,10 @@ export class OrbitCam {
     if (this.enableDamping) {
       this.theta += (this.thetaT - this.theta) * this.dampingFactor;
       this.phi += (this.phiT - this.phi) * this.dampingFactor;
+      this.radius += (this.radiusT - this.radius) * this.dampingFactor;
     } else {
       this.theta = this.thetaT; this.phi = this.phiT;
+      this.radius = this.radiusT;
     }
     this.pos = sphericalPos(this.target, this.radius, this.phi, this.theta);
     this.view = lookAt(this.pos, this.target, [0, 1, 0]);

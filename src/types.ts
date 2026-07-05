@@ -18,8 +18,8 @@ export type LabelOpts = {
   backdrop?: boolean;
   /** Pill fill RGB; the ~0.6 alpha is applied by the library (default dark). */
   backdropColor?: Color;
-  /** Base world size at camera.zoom==1 (default ~0.14); the apparent on-screen
-   *  size is held constant by compensating the label quad for the OrbitCam dolly. */
+  /** Base world size at the default dolly (default ~0.14); the apparent on-screen
+   *  size is held constant by compensating the label quad for the OrbitCam dolly (ortho zoom / perspective distance). */
   size?: number;
   /** Per-frame alpha like the other primitives (default 1). */
   alpha?: number;
@@ -55,7 +55,7 @@ export type FigCtx = {
   /** 3D-anchored, screen-fixed text label with a rounded-rect backdrop pill.
    *  It sits on a 3D point (its anchor `pos`), is billboarded to face the camera,
    *  and stays a CONSTANT on-screen size by compensating the quad for the OrbitCam
-   *  dolly (camera.zoom). It renders on top (depthTest off, depthWrite off) so it
+   *  dolly (ortho zoom, or the perspective camera distance). It renders on top (depthTest off, depthWrite off) so it
    *  survives the WebM/WebP export; per-frame `opts.alpha` scales its opacity.
    *  See {@link LabelOpts}. */
   label(pos: FigPos, text: string, opts?: LabelOpts): Vec3;
@@ -80,8 +80,14 @@ export type Frame = { step: number; t: number; dt: number; tStep: number; pStep:
 export type FigSpec = {
   /** Cumulative keyframe timestamps (seconds); the last `at` is the total duration. */
   keyframe_timestamps: Keyframe[];
-  /** Orthographic camera: position, look-at target, and half-frustum size. */
-  camera: { pos: Vec3; target: Vec3; frustum: number };
+  /** Camera: position + look-at target. `frustum` (half-extent at the target) selects an
+   *  orthographic camera; `fov` (full vertical field of view in degrees) selects a
+   *  perspective camera. If both are given, `fov` wins (perspective). If neither is
+   *  given, the default is a 15° FOV perspective. For perspective, `frustum` (if
+   *  present) is used as the framing half-extent at the target to set the orbit
+   *  distance (radius = frustum / tan(fov/2)); otherwise the pos->target distance
+   *  is used. */
+  camera: { pos: Vec3; target: Vec3; frustum?: number; fov?: number };
   /** Issued every frame with the current frame timing; builds the scene for that
    *  frame only — the framework discards everything after render. */
   draw(ctx: FigCtx, f: Frame): void;
