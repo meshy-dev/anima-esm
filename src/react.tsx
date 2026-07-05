@@ -14,12 +14,28 @@ import { createFigure, type FigSpec, type Palette } from "./core";
  * replay / pause / download UI, in-canvas caption, render loop, WebM / WebP
  * export). Disposes the engine on unmount or when `spec` / `palette` change.
  */
-export function Figure({ spec, palette }: { spec: FigSpec; palette?: Palette }) {
+export function Figure({
+  spec,
+  palette,
+  endHoldMs,
+  loop,
+}: {
+  spec: FigSpec;
+  palette?: Palette;
+  /** Milliseconds to hold on the final frame before auto-restarting (default 5000). */
+  endHoldMs?: number;
+  /** Set false to hold on the final frame forever (no auto-restart). */
+  loop?: boolean;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!ref.current) return;
-    const ctrl = createFigure(spec, ref.current, palette ? { palette } : {});
+    const opts: { palette?: Palette; endHoldMs?: number; loop?: boolean } = {};
+    if (palette) opts.palette = palette;
+    if (endHoldMs !== undefined) opts.endHoldMs = endHoldMs;
+    if (loop !== undefined) opts.loop = loop;
+    const ctrl = createFigure(spec, ref.current, opts);
     return () => ctrl.dispose();
-  }, [spec, palette]);
+  }, [spec, palette, endHoldMs, loop]);
   return <div ref={ref} style={{ position: "relative", width: "100%", maxWidth: 480, aspectRatio: "1 / 1", margin: "0 auto" }} />;
 }

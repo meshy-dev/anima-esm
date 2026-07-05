@@ -58,9 +58,19 @@ const LABEL_DEFAULT_BACKDROP = new THREE.Color(0x000000);
 const LABEL_DEFAULT_SIZE = 0.14;
 const LABEL_BACKDROP_ALPHA = 0.6;
 
-export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette?: Palette }): FigureController {
+export function createFigure(
+    spec: FigSpec,
+    mount: HTMLElement,
+    opts?: { palette?: Palette; endHoldMs?: number; loop?: boolean },
+): FigureController {
     const { keyframe_timestamps: kfs, camera: camSpec, draw } = spec;
     const P = opts?.palette ?? DEFAULT_PALETTE;
+    // Auto-restart: once the timeline reaches the final keyframe it holds on the
+    // last frame for `endHoldMs` milliseconds (default 5000), then restarts from
+    // t=0 — looping indefinitely. Disable (hold on the final frame forever) with
+    // `loop: false`, `endHoldMs <= 0`, or a non-finite `endHoldMs` (e.g. Infinity).
+    const endHoldMs0 = opts?.endHoldMs ?? 5000;
+    const endHold = opts?.loop !== false && endHoldMs0 > 0 && Number.isFinite(endHoldMs0) ? endHoldMs0 / 1000 : Infinity;
 
     const SZ = mount.clientWidth || 480;
     const FR = camSpec.frustum;
@@ -468,13 +478,13 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     const downloadBtn = mkBtnLeft("\u2b07", "Download animation", 8);
 
     const total = kfs.length ? kfs[kfs.length - 1].at : 0;
-    let t = 0, lastT = 0, playing = false, started = false, userPaused = false, inView = false;
+    let t = 0, lastT = 0, playing = false, started = false, userPaused = false, inView = false, holdT = 0;
     let raf = 0;
     let recording: "webcodecs" | "webp" | null = null;
     let capturing = false; // true during an export (WebCodecs or WebP): the live rAF idles, the capture loop drives renderAtTime.
     let disposed = false; // set by the cleanup; the capture loop's finally skips DOM touches after unmount.
     const setPauseIcon = () => { pauseBtn.textContent = userPaused ? "\u25b6" : "\u23f8"; };
-    const restart = () => { if (recording) return; t = 0; playing = true; userPaused = false; setPauseIcon(); };
+    const restart = () => { if (recording) return; t = 0; playing = true; userPaused = false; holdT = 0; setPauseIcon(); };
     const togglePause = () => { if (recording) return; userPaused = !userPaused; setPauseIcon(); };
     replay.addEventListener("click", restart);
     pauseBtn.addEventListener("click", togglePause);
@@ -535,7 +545,11 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       const dt = (now - lastT) / 1000; lastT = now;
       if (playing && !userPaused) {
         t += dt;
-        if (total > 0 && t >= total) { t = total; playing = false; }
+        if (total > 0 && t >= total) { t = total; playing = false; holdT = 0; }
+      } else if (!playing && !userPaused && total > 0 && t >= total) {
+        // holding on the final frame: count the end-hold, then restart the loop.
+        holdT += dt;
+        if (holdT >= endHold) { t = 0; playing = true; holdT = 0; }
       }
       renderAtTime(t, dt);
       raf = requestAnimationFrame(render);
