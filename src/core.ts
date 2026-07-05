@@ -126,10 +126,18 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     const capMat = new THREE.SpriteMaterial({ map: capTex, transparent: true, depthTest: false, depthWrite: false });
     const capSprite = new THREE.Sprite(capMat);
     capSprite.renderOrder = 999;
-    scene.add(camera); // camera must be in the scene graph for its child to render.
-    camera.add(capSprite);
-    capSprite.position.set(0, -0.82 * FR, -1);
-    capSprite.scale.set(1.7 * FR, 0.30 * FR, 1);
+    capSprite.frustumCulled = false;
+    // HUD camera: fixed frustum never touched by the OrbitCam dolly. The
+    // caption is rendered in a second pass after the main scene, so its
+    // on-canvas size stays constant regardless of camera.zoom — yet it still
+    // renders INTO the WebGL canvas, so the WebM/WebP export keeps it.
+    renderer.autoClear = false; // we now render two passes and clear manually.
+    const hudScene = new THREE.Scene();
+    const hudCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    hudCam.position.set(0, 0, 5);
+    hudScene.add(capSprite);
+    capSprite.position.set(0, -0.82, 0);
+    capSprite.scale.set(1.7, 0.30, 1);
     let lastCap = "";
     drawCaption(kfs[0]?.caption ?? "");
     lastCap = kfs[0]?.caption ?? "";
@@ -426,7 +434,12 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       if (cap !== lastCap) { drawCaption(cap); lastCap = cap; }
       pfill.style.width = (total > 0 ? clamp01(t / total) * 100 : 0) + "%";
       controls.update();
+      // two-pass overlay — main scene then fixed HUD caption (hudCam, never
+      // zoomed) on top; autoClear off so the HUD pass does not wipe the main pass.
+      renderer.clear();
       renderer.render(scene, camera);
+      renderer.clearDepth();
+      renderer.render(hudScene, hudCam);
     };
     const render = (now: number) => {
       if (capturing) { raf = requestAnimationFrame(render); return; }
@@ -603,7 +616,7 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       downloadBtn.removeEventListener("mouseleave", startHide);
       menu.removeEventListener("mouseenter", cancelHide);
       menu.removeEventListener("mouseleave", startHide);
-      camera.remove(capSprite); capMat.dispose(); capTex.dispose();
+      hudScene.remove(capSprite); capMat.dispose(); capTex.dispose();
       pbar.remove(); replay.remove(); pauseBtn.remove(); downloadBtn.remove(); menu.remove();
       controls.dispose();
       for (const e of retained.values()) disposeEntry(e);
