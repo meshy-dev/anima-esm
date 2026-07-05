@@ -115,7 +115,7 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       for (const ln of lines) widest = Math.max(widest, capCtx.measureText(ln).width);
       const boxW = widest + padX * 2, boxH = lines.length * lineH + padY * 2;
       const bx = (1024 - boxW) / 2, by = (180 - boxH) / 2;
-      capCtx.fillStyle = "rgba(8,8,14,0.72)";
+      capCtx.fillStyle = "#00000099"; // --color-bg-modal-overlay (Meshy design system)
       roundRect(capCtx, bx, by, boxW, boxH, 14);
       capCtx.fill(); // tinted backdrop only, no border (YouTube-style pill).
       capCtx.fillStyle = P.ink;

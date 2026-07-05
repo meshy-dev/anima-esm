@@ -23,22 +23,26 @@ export type Palette = {
   z: string;
 };
 
+// Meshy design system (~/meshy-design-system), dark-mode tokens. Values copied
+// from references/design-tokens.md — keep in sync if the design system changes.
+// Keys not defined by the design system (accent3, x/y/z axes) reuse semantic
+// highlights by the same visual principle (a 3rd warm accent; red/green/blue axes).
 export const DEFAULT_PALETTE: Palette = {
-  bg: "#0b0b12",
-  panel: "#14141e",
-  panel2: "#1b1b28",
-  panel3: "#222234",
-  ink: "#e9e9f2",
-  dim: "#9a9ab4",
-  muted: "#62627a",
-  line: "rgba(255,255,255,.10)",
-  accent: "#5ad1ff",
-  accent2: "#b98bff",
-  accent3: "#ffcf6a",
-  good: "#6fe3a3",
-  bad: "#ff7a7a",
-  warn: "#ffbf6a",
-  x: "#ff8a9a",
-  y: "#7fe3a0",
-  z: "#6ab8ff",
+  bg: "#0e0e0e",      // --color-bg-strong
+  panel: "#181818",    // --color-bg-base
+  panel2: "#1e1e1e",   // --color-bg-sub
+  panel3: "#303030",   // --color-bg-shade
+  ink: "#ffffff",      // --color-label-title
+  dim: "#9b9b9b",      // --color-label-soft
+  muted: "#696969",    // --color-label-muted
+  line: "#ffffff1a",   // --color-bg-translucent-strong (10% white)
+  accent: "#c5f955",   // --color-accent-base (lime)
+  accent2: "#ff3e8f",  // --color-accent-support-base (pink)
+  accent3: "#f5ad57",  // --color-semantic-warning-highlight (3rd accent)
+  good: "#69ee77",     // --color-semantic-success-highlight
+  bad: "#f55959",      // --color-semantic-error-highlight
+  warn: "#f5ad57",     // --color-semantic-warning-highlight
+  x: "#f55959",        // --color-semantic-error-highlight (axis red)
+  y: "#69ee77",        // --color-semantic-success-highlight (axis green)
+  z: "#6c99f2",        // --color-semantic-info-highlight (axis blue)
 };
