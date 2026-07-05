@@ -1,11 +1,11 @@
 // Build script: produces two ESM bundles (min + debug) with react / react-dom /
 // three kept EXTERNAL (the consumer resolves them, e.g. via an importmap), the
 // vendored WebM (mediabunny) and animated-WebP muxers inlined, plus a gzipped
-// min bundle. TypeScript types are NOT emitted by this script (tsconfig.json is
-// editor-only, noEmit); run `tsc -p tsconfig.json` separately to emit .d.ts.
+// min bundle. TypeScript .d.ts are emitted by tsc, which the npm build runs after
+// this script; this script also stages the vendored .d.ts companions next to them.
 
 import * as esbuild from "esbuild";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
 // Peer dependencies the consumer provides. three is fully external: the bare
@@ -57,4 +57,10 @@ await esbuild.build({
 // gzip the min bundle.
 writeFileSync("dist/anima.min.mjs.gz", gzipSync(readFileSync("dist/anima.min.mjs")));
 
-console.log("build: dist/anima.min.mjs (+ .gz) + dist/anima.debug.mjs");
+// Stage vendored .d.ts companions next to the emitted .d.ts so the published
+// types are self-contained (Figure.d.ts imports "./vendor/mediabunny.js" etc.).
+mkdirSync("dist/vendor", { recursive: true });
+copyFileSync("src/vendor/mediabunny.d.ts", "dist/vendor/mediabunny.d.ts");
+copyFileSync("src/vendor/webp_anim.d.ts", "dist/vendor/webp_anim.d.ts");
+
+console.log("build: dist/anima.min.mjs (+ .gz) + dist/anima.debug.mjs + dist/vendor/*.d.ts");

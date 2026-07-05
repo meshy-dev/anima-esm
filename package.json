@@ -7,15 +7,19 @@
   "sideEffects": false,
   "main": "./dist/anima.min.mjs",
   "module": "./dist/anima.min.mjs",
+  "types": "./dist/index.d.ts",
   "files": ["dist", "README.md", "LICENSE"],
   "exports": {
-    ".": "./dist/anima.min.mjs",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/anima.min.mjs"
+    },
     "./anima.min.mjs": "./dist/anima.min.mjs",
     "./anima.debug.mjs": "./dist/anima.debug.mjs",
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "node build.mjs",
+    "build": "node build.mjs && tsc -p tsconfig.json",
     "ci": "node build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "clean": "rm -rf dist"
