@@ -1,6 +1,6 @@
 // anima-esm — immediate-mode 3D animation framework: VANILLA CORE.
 //
-// The whole engine (renderer, scene, OrbitControls, the immediate-mode ctx,
+// The whole engine (renderer, scene, OrbitCam, the immediate-mode ctx,
 // buffer -> resolve -> reconcile render loop, renderAtTime, rAF,
 // IntersectionObserver, ResizeObserver, in-canvas caption, hover download menu,
 // WebCodecs/mediabunny WebM + WebP export) lives here in a single vanilla
@@ -13,7 +13,7 @@
 // the user clicks download, so this core bundle carries zero muxer code.
 
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { OrbitCam } from "./orbit";
 import { clamp01 } from "./helpers";
 import { DEFAULT_PALETTE, type Palette } from "./palette";
 import type { FigCtx, FigEntry, FigPos, FigSpec, Frame, NodePlace } from "./types";
@@ -67,7 +67,7 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     renderer.domElement.style.display = "block";
     renderer.domElement.style.cursor = "grab";
     mount.appendChild(renderer.domElement);
-    const controls = new OrbitControls(camera, renderer.domElement);
+    const controls = new OrbitCam(camera, renderer.domElement);
     controls.enableDamping = true; controls.dampingFactor = 0.08; controls.enablePan = false;
     controls.minZoom = 0.5; controls.maxZoom = 4;
     controls.autoRotate = true; controls.autoRotateSpeed = 0.5;
@@ -76,7 +76,7 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     // in-canvas caption: Sprite + CanvasTexture pinned to the camera so it
     // renders INTO the WebGL canvas (the WebM export captures the canvas -- the
     // caption survives in the downloaded video, unlike a DOM overlay) and stays
-    // bottom-center during OrbitControls auto-rotate. The texture redraws only
+    // bottom-center during OrbitCam auto-rotate. The texture redraws only
     // when the caption text changes (no per-frame CanvasTexture re-upload).
     const capCanvas = document.createElement("canvas");
     capCanvas.width = 1024; capCanvas.height = 180;
