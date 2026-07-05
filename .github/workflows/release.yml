@@ -14,6 +14,12 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+# Silence [DEP0040] `punycode` built-in deprecation warnings emitted by the
+# deploy-pages action (and esbuild) on Node 22/24 runners — upstream noise, not
+# actionable from this repo. --disable-warning=CODE is targeted (Node 21.2+).
+env:
+  NODE_OPTIONS: "--disable-warning=DEP0040"
+
 jobs:
   build:
     runs-on: ubuntu-latest
