@@ -23,18 +23,22 @@ export type FigPos = THREE.Vector3 | string;
 /** Immediate-mode draw context handed to {@link FigSpec.draw} each frame.
  * Every call is BUFFERED during draw() and reconciled AFTER draw() returns,
  * because positions may be node keys whose world positions are unknown until
- * the node graph resolves. `scope` pushes a key prefix so equal local keys do
- * not collide across scopes. */
+ * the node graph resolves. The generic primitives are `node`, `sphere`, `line`,
+ * `bar`, `quad`; `draw` is the CUSTOM-primitive escape hatch (you supply a
+ * THREE.Object3D, the library retains it by key + applies per-frame alpha).
+ * `scope` pushes a key prefix so equal local keys do not collide across scopes. */
 export type FigCtx = {
   node(key: string, place: NodePlace): void;
-  cube(key: string, pos: FigPos, color: THREE.Color, alpha: number): void;
-  vd(key: string, pos: FigPos, color: THREE.Color, alpha: number): void;
-  crossing(key: string, pos: FigPos, color: THREE.Color, alpha: number, radius?: number): void;
-  edge(key: string, a: FigPos, b: FigPos, color: THREE.Color, alpha: number): void;
+  sphere(key: string, pos: FigPos, radius: number, color: THREE.Color, alpha: number): void;
   line(key: string, a: FigPos, b: FigPos, color: THREE.Color, alpha: number): void;
   bar(key: string, a: FigPos, b: FigPos, radius: number, color: THREE.Color, alpha: number): void;
   quad(key: string, verts: FigPos[], color: THREE.Color, alpha: number): void;
-  tri(key: string, a: FigPos, b: FigPos, color: THREE.Color, alpha: number): void;
+  /** Custom primitive: retain a consumer-built THREE.Object3D by `key`. The
+   *  library adds it to the scene on first draw, reuses it on update, removes it
+   *  on drop, and each frame sets `object.visible = alpha > 0.001` and traverses
+   *  materials to set `transparent + opacity = alpha` (best-effort). The consumer
+   *  owns the object's geometry/material lifecycle. */
+  draw(key: string, object: THREE.Object3D, alpha: number): void;
   scope(prefix: string, fn: () => void): void;
 };
 
@@ -56,10 +60,12 @@ export type FigSpec = {
   name?: string;
 };
 
-/** A retained three.js object reconciled by key across frames. Internal. */
+/** A retained three.js object reconciled by key across frames. Internal. For
+ *  the generic primitives `mat` is the library-owned material; for the custom
+ *  `draw` primitive `mat` is absent (the consumer owns the object's materials). */
 export type FigEntry = {
   obj: THREE.Object3D;
-  mat: THREE.MeshBasicMaterial | THREE.LineBasicMaterial;
+  mat?: THREE.MeshBasicMaterial | THREE.LineBasicMaterial;
   kind: string;
   ownsGeo: boolean;
   sig: string;

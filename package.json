@@ -18,10 +18,16 @@
       "types": "./dist/react-index.d.ts",
       "import": "./dist/anima-react.min.mjs"
     },
+    "./muxers": {
+      "types": "./dist/muxers.d.ts",
+      "import": "./dist/anima-muxers.min.mjs"
+    },
     "./anima.min.mjs": "./dist/anima.min.mjs",
     "./anima.debug.mjs": "./dist/anima.debug.mjs",
     "./anima-react.min.mjs": "./dist/anima-react.min.mjs",
     "./anima-react.debug.mjs": "./dist/anima-react.debug.mjs",
+    "./anima-muxers.min.mjs": "./dist/anima-muxers.min.mjs",
+    "./anima-muxers.debug.mjs": "./dist/anima-muxers.debug.mjs",
     "./package.json": "./package.json"
   },
   "scripts": {

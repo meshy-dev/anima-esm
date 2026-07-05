@@ -8,12 +8,12 @@
 // (src/react.tsx) that calls createFigure from a <div> mount.
 //
 // three is a peer (the consumer resolves it, e.g. via an importmap). The WebM
-// muxer (mediabunny) and the animated-WebP muxer (webp_anim) are bundled inline.
+// muxer (mediabunny) and the animated-WebP muxer (webp_anim) live in a SEPARATE
+// bundle (anima-esm/muxers); the core dynamic-imports them on demand only when
+// the user clicks download, so this core bundle carries zero muxer code.
 
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { Output, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH } from "./vendor/mediabunny";
-import { muxAnimatedWebP } from "./vendor/webp_anim";
 import { clamp01 } from "./helpers";
 import { DEFAULT_PALETTE, type Palette } from "./palette";
 import type { FigCtx, FigEntry, FigPos, FigSpec, Frame, NodePlace } from "./types";
@@ -22,7 +22,6 @@ import type { FigCtx, FigEntry, FigPos, FigSpec, Frame, NodePlace } from "./type
 // wrapper and the core entry both import from here).
 export { clamp01, lerp, smoothstep, ease } from "./helpers";
 export { DEFAULT_PALETTE, type Palette } from "./palette";
-export { muxAnimatedWebP } from "./vendor/webp_anim";
 export type { FigSpec, FigCtx, Frame, Keyframe, NodePlace, FigPos, FigEntry, Step } from "./types";
 
 /** Controller returned by {@link createFigure}. Owns the canvas + buttons it
@@ -139,17 +138,21 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     const retained = new Map<string, FigEntry>();
     const disposables: Array<{ dispose: () => void }> = [];
     const track = <T extends { dispose: () => void }>(d: T): T => { disposables.push(d); return d; };
-    const cubeEdgeGeo = track(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)));
-    const vdBarGeo = track(new THREE.CylinderGeometry(0.015, 0.015, 0.13, 8));
-    const crossGeo = track(new THREE.SphereGeometry(0.06, 12, 10));
-    const EDGE_R = 0.03;
-    const DEFAULT_CROSS_R = 0.06; // crossGeo sphere radius — default for the `crossing` primitive's optional radius scaling.
+    // shared geometry for the generic primitives. `sphere` scales the unit sphere
+    // by its radius arg; `bar` builds a per-key cylinder. (cube/vd/crossing/edge/tri
+    // domain primitives were removed — build them yourself via ctx.draw().)
+    const sphereGeo = track(new THREE.SphereGeometry(1, 16, 12));
     const UP = new THREE.Vector3(0, 1, 0);
-    const edgeBarGeo = track(new THREE.CylinderGeometry(EDGE_R, EDGE_R, 1, 12));
     const drawnThisFrame = new Set<string>();
+    // Dispose a retained entry. For the generic library primitives (line/bar/
+    // quad/sphere) we own the geometry (when ownsGeo) and the material. For the
+    // custom draw() primitive the CONSUMER owns the object's geometry/material
+    // lifecycle (they built the THREE.Object3D), so we only scene.remove it (the
+    // caller does that) and dispose nothing here.
     const disposeEntry = (e: FigEntry) => {
+      if (e.kind === "draw") return;
       if (e.ownsGeo) (e.obj as THREE.Mesh | THREE.Line | THREE.LineSegments).geometry.dispose();
-      e.mat.dispose();
+      e.mat!.dispose();
     };
     const sig = (pts: THREE.Vector3[]): string =>
       pts.map((p) => p.x.toFixed(4) + "," + p.y.toFixed(4) + "," + p.z.toFixed(4)).join("|");
@@ -167,15 +170,15 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     // (string) whose world positions are unknown until the node graph resolves.
     const stack: string[] = [];
     const full = (key: string): string => (stack.length ? stack.join("/") + "/" + key : key);
+    // Buffered draw calls (generic primitives only — no domain primitives).
+    // `draw` carries a consumer-built THREE.Object3D retained by key (custom
+    // primitive mechanism): the library owns only its scene membership + alpha.
     type DrawCall =
-      | { kind: "cube"; key: string; pos: FigPos; color: THREE.Color; alpha: number }
-      | { kind: "vd"; key: string; pos: FigPos; color: THREE.Color; alpha: number }
-      | { kind: "crossing"; key: string; pos: FigPos; color: THREE.Color; alpha: number; radius?: number }
-      | { kind: "edge"; key: string; a: FigPos; b: FigPos; color: THREE.Color; alpha: number }
+      | { kind: "sphere"; key: string; pos: FigPos; radius: number; color: THREE.Color; alpha: number }
       | { kind: "line"; key: string; a: FigPos; b: FigPos; color: THREE.Color; alpha: number }
       | { kind: "bar"; key: string; a: FigPos; b: FigPos; radius: number; color: THREE.Color; alpha: number }
       | { kind: "quad"; key: string; verts: FigPos[]; color: THREE.Color; alpha: number }
-      | { kind: "tri"; key: string; a: FigPos; b: FigPos; color: THREE.Color; alpha: number };
+      | { kind: "draw"; key: string; object: THREE.Object3D; alpha: number };
     const nodePlaces = new Map<string, NodePlace>();
     const drawCalls: DrawCall[] = [];
     const resolved = new Map<string, THREE.Vector3>(); // memo: resolved node world positions
@@ -207,106 +210,31 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     // Reconcile one buffered draw call against the retained map using its
     // RESOLVED world positions. If any position arg resolves to null (a node
     // not placed / unresolved / cyclic), skip it entirely: do NOT add its key to
-    // drawnThisFrame so its retained object drops this frame. Otherwise create
-    // / update exactly as the immediate model does (cube: LineSegments of
-    // cubeEdgeGeo; vd: Group of 3 vdBarGeo cylinders; crossing: Mesh of
-    // crossGeo; edge: Mesh from 2 points, sig-rebuild; quad: Mesh of
-    // quadGeo(verts), DoubleSide, sig-rebuild; tri: Line from 2 points, sig-rebuild).
+    // drawnThisFrame so its retained object drops this frame. Generic primitives:
+    // sphere -> Mesh of the unit sphereGeo scaled by radius; line -> LineSegments
+    // from 2 points, sig-rebuild; bar -> oriented cylinder a->b, sig-rebuild; quad
+    // -> Mesh of quadGeo(verts), DoubleSide, sig-rebuild. draw -> a consumer-built
+    // THREE.Object3D retained by key (add on first draw, reuse on update, remove
+    // on drop): the library owns ONLY its scene membership + per-frame alpha (it
+    // sets object.visible + traverses materials to apply opacity); the consumer
+    // owns the object's geometry/material lifecycle.
     const reconcile = (dc: DrawCall): void => {
-      if (dc.kind === "cube") {
-        const pos = resolveFigPos(dc.pos);
-        if (!pos) return;
-        drawnThisFrame.add(dc.key);
-        let e = retained.get(dc.key);
-        if (!e) {
-          const mat = new THREE.LineBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0 });
-          const obj = new THREE.LineSegments(cubeEdgeGeo, mat);
-          scene.add(obj);
-          e = { obj, mat, kind: "cube", ownsGeo: false, sig: "" };
-          retained.set(dc.key, e);
-        }
-        e.obj.position.copy(pos);
-        e.mat.color.copy(dc.color); e.mat.opacity = clamp01(dc.alpha); e.mat.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "vd") {
+      if (dc.kind === "sphere") {
         const pos = resolveFigPos(dc.pos);
         if (!pos) return;
         drawnThisFrame.add(dc.key);
         let e = retained.get(dc.key);
         if (!e) {
           const mat = new THREE.MeshBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0 });
-          const g = new THREE.Group();
-          const bx = new THREE.Mesh(vdBarGeo, mat); bx.rotation.z = Math.PI / 2;
-          const by = new THREE.Mesh(vdBarGeo, mat);
-          const bz = new THREE.Mesh(vdBarGeo, mat); bz.rotation.x = Math.PI / 2;
-          g.add(bx, by, bz); scene.add(g);
-          e = { obj: g, mat, kind: "vd", ownsGeo: false, sig: "" };
+          const obj = new THREE.Mesh(sphereGeo, mat);
+          scene.add(obj);
+          e = { obj, mat, kind: "sphere", ownsGeo: false, sig: "" };
           retained.set(dc.key, e);
         }
         e.obj.position.copy(pos);
-        e.mat.color.copy(dc.color); e.mat.opacity = clamp01(dc.alpha); e.mat.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "crossing") {
-        const pos = resolveFigPos(dc.pos);
-        if (!pos) return;
-        drawnThisFrame.add(dc.key);
-        let e = retained.get(dc.key);
-        if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0 });
-          const obj = new THREE.Mesh(crossGeo, mat);
-          scene.add(obj);
-          e = { obj, mat, kind: "crossing", ownsGeo: false, sig: "" };
-          retained.set(dc.key, e);
-        }
-        e.obj.position.copy(pos);
-        (e.obj as THREE.Mesh).scale.setScalar((dc.radius ?? DEFAULT_CROSS_R) / DEFAULT_CROSS_R);
-        e.mat.color.copy(dc.color); e.mat.opacity = clamp01(dc.alpha); e.mat.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "edge") {
-        const a = resolveFigPos(dc.a), b = resolveFigPos(dc.b);
-        if (!a || !b) return;
-        drawnThisFrame.add(dc.key);
-        const s = sig([a, b]);
-        let e = retained.get(dc.key);
-        const len = a.distanceTo(b);
-        const mid = a.clone().add(b).multiplyScalar(0.5);
-        const dir = b.clone().sub(a).normalize();
-        if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0 });
-          const obj = new THREE.Mesh(edgeBarGeo, mat);
-          obj.position.copy(mid);
-          obj.quaternion.setFromUnitVectors(UP, dir);
-          obj.scale.set(1, len, 1);
-          scene.add(obj);
-          e = { obj, mat, kind: "edge", ownsGeo: false, sig: s };
-          retained.set(dc.key, e);
-        } else if (e.sig !== s) {
-          (e.obj as THREE.Mesh).position.copy(mid);
-          (e.obj as THREE.Mesh).quaternion.setFromUnitVectors(UP, dir);
-          (e.obj as THREE.Mesh).scale.set(1, len, 1);
-          e.sig = s;
-        }
-        e.mat.color.copy(dc.color); e.mat.opacity = clamp01(dc.alpha); e.mat.transparent = true;
-        e.obj.visible = dc.alpha > 0.001;
-      } else if (dc.kind === "quad") {
-        const vs = dc.verts.map(resolveFigPos);
-        if (vs.some((v) => !v)) return;
-        const verts = vs as THREE.Vector3[];
-        drawnThisFrame.add(dc.key);
-        const s = sig(verts);
-        let e = retained.get(dc.key);
-        if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0, side: THREE.DoubleSide });
-          const obj = new THREE.Mesh(quadGeo(verts), mat);
-          scene.add(obj);
-          e = { obj, mat, kind: "quad", ownsGeo: true, sig: s };
-          retained.set(dc.key, e);
-        } else if (e.sig !== s) {
-          (e.obj as THREE.Mesh).geometry.dispose();
-          (e.obj as THREE.Mesh).geometry = quadGeo(verts);
-          e.sig = s;
-        }
-        e.mat.color.copy(dc.color); e.mat.opacity = clamp01(dc.alpha); e.mat.transparent = true;
+        (e.obj as THREE.Mesh).scale.setScalar(dc.radius);
+        const m = e.mat!;
+        m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
       } else if (dc.kind === "line") {
         const a = resolveFigPos(dc.a), b = resolveFigPos(dc.b);
@@ -325,7 +253,8 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
           (e.obj as THREE.LineSegments).geometry = new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]);
           e.sig = s;
         }
-        e.mat.color.copy(dc.color); e.mat.opacity = clamp01(dc.alpha); e.mat.transparent = true;
+        const m = e.mat!;
+        m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
       } else if (dc.kind === "bar") {
         const a = resolveFigPos(dc.a), b = resolveFigPos(dc.b);
@@ -351,39 +280,62 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
           (e.obj as THREE.Mesh).quaternion.setFromUnitVectors(UP, dir);
           e.sig = s;
         }
-        e.mat.color.copy(dc.color); e.mat.opacity = clamp01(dc.alpha); e.mat.transparent = true;
+        const m = e.mat!;
+        m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
-      } else { // tri
-        const a = resolveFigPos(dc.a), b = resolveFigPos(dc.b);
-        if (!a || !b) return;
+      } else if (dc.kind === "quad") {
+        const vs = dc.verts.map(resolveFigPos);
+        if (vs.some((v) => !v)) return;
+        const verts = vs as THREE.Vector3[];
         drawnThisFrame.add(dc.key);
-        const s = sig([a, b]);
+        const s = sig(verts);
         let e = retained.get(dc.key);
         if (!e) {
-          const mat = new THREE.LineBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0 });
-          const obj = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]), mat);
+          const mat = new THREE.MeshBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0, side: THREE.DoubleSide });
+          const obj = new THREE.Mesh(quadGeo(verts), mat);
           scene.add(obj);
-          e = { obj, mat, kind: "tri", ownsGeo: true, sig: s };
+          e = { obj, mat, kind: "quad", ownsGeo: true, sig: s };
           retained.set(dc.key, e);
         } else if (e.sig !== s) {
-          (e.obj as THREE.Line).geometry.dispose();
-          (e.obj as THREE.Line).geometry = new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]);
+          (e.obj as THREE.Mesh).geometry.dispose();
+          (e.obj as THREE.Mesh).geometry = quadGeo(verts);
           e.sig = s;
         }
-        e.mat.color.copy(dc.color); e.mat.opacity = clamp01(dc.alpha); e.mat.transparent = true;
+        const m = e.mat!;
+        m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
+      } else { // draw: consumer-built THREE.Object3D, retained by key.
+        drawnThisFrame.add(dc.key);
+        let e = retained.get(dc.key);
+        if (!e) {
+          scene.add(dc.object);
+          e = { obj: dc.object, kind: "draw", ownsGeo: false, sig: "" };
+          retained.set(dc.key, e);
+        } else if (e.obj !== dc.object) {
+          // consumer swapped the object for this key: drop the old (the consumer
+          // owns it — we do NOT dispose), retain the new.
+          scene.remove(e.obj);
+          scene.add(dc.object);
+          e.obj = dc.object;
+        }
+        const a = clamp01(dc.alpha);
+        dc.object.visible = dc.alpha > 0.001;
+        // best-effort: apply per-frame alpha to every material in the object.
+        dc.object.traverse((o) => {
+          const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+          if (!mat) return;
+          const mats = Array.isArray(mat) ? mat : [mat];
+          for (const mm of mats) { mm.transparent = true; mm.opacity = a; }
+        });
       }
     };
     const ctx: FigCtx = {
       node(key, place) { nodePlaces.set(full(key), place); },
-      cube(key, pos, color, alpha) { drawCalls.push({ kind: "cube", key: full(key), pos, color, alpha }); },
-      vd(key, pos, color, alpha) { drawCalls.push({ kind: "vd", key: full(key), pos, color, alpha }); },
-      crossing(key, pos, color, alpha, radius) { drawCalls.push({ kind: "crossing", key: full(key), pos, color, alpha, radius }); },
-      edge(key, a, b, color, alpha) { drawCalls.push({ kind: "edge", key: full(key), a, b, color, alpha }); },
+      sphere(key, pos, radius, color, alpha) { drawCalls.push({ kind: "sphere", key: full(key), pos, radius, color, alpha }); },
       line(key, a, b, color, alpha) { drawCalls.push({ kind: "line", key: full(key), a, b, color, alpha }); },
       bar(key, a, b, radius, color, alpha) { drawCalls.push({ kind: "bar", key: full(key), a, b, radius, color, alpha }); },
       quad(key, verts, color, alpha) { drawCalls.push({ kind: "quad", key: full(key), verts, color, alpha }); },
-      tri(key, a, b, color, alpha) { drawCalls.push({ kind: "tri", key: full(key), a, b, color, alpha }); },
+      draw(key, object, alpha) { drawCalls.push({ kind: "draw", key: full(key), object, alpha }); },
       scope(prefix, fn) { stack.push(prefix); fn(); stack.pop(); },
     };
 
@@ -496,6 +448,7 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       downloadBtn.textContent = "\u23fa";
       downloadBtn.style.color = P.accent;
       const N = Math.ceil(total * fps);
+      const { Output, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH } = await import("anima-esm/muxers");
       const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() });
       const videoSource = new CanvasSource(renderer.domElement, { codec, bitrate: QUALITY_HIGH, keyFrameInterval: 1 });
       output.addVideoTrack(videoSource, { frameRate: fps });
@@ -563,6 +516,7 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
           frames.push(new Uint8Array(await blob.arrayBuffer()));
           if (i % 5 === 0) { pfill.style.width = (i / N * 100) + "%"; await new Promise<void>((r) => requestAnimationFrame(() => r())); }
         }
+        const { muxAnimatedWebP } = await import("anima-esm/muxers");
         const bytes = muxAnimatedWebP(frames, w, h, delayMs);
         const blob = new Blob([bytes], { type: "image/webp" });
         const url = URL.createObjectURL(blob);
