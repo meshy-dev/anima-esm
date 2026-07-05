@@ -41,9 +41,20 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry_1.outputs.page_url || steps.deployment_retry_2.outputs.page_url }}
     steps:
+      # deploy-pages intermittently fails with "Deployment failed, try again
+      # later" — a transient GitHub Pages API hiccup (unrelated to this repo's
+      # content). Retry up to 3 attempts; the job fails only if all 3 fail.
       - id: deployment
+        uses: actions/deploy-pages@v5.0.0
+        continue-on-error: true
+      - if: steps.deployment.outcome == 'failure'
+        id: deployment_retry_1
+        uses: actions/deploy-pages@v5.0.0
+        continue-on-error: true
+      - if: steps.deployment.outcome == 'failure' && steps.deployment_retry_1.outcome == 'failure'
+        id: deployment_retry_2
         uses: actions/deploy-pages@v5.0.0
 
   publish-npm:
