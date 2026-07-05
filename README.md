@@ -101,6 +101,7 @@ download menu, and the rAF render loop inside `mount`. Returns a controller:
 - `bar(key, a, b, radius, color, alpha)` — oriented cylinder a→b.
 - `sphere(key, pos, radius, color, alpha)` — a sphere.
 - `quad(key, verts, color, alpha)` — a filled quad (`verts`: 4 positions).
+- `triangles(key, tris, color, alpha)` — a filled triangle list (soup); `tris` is an array of triangles, each `[a, b, c]` of positions. Non-indexed geometry, DoubleSide; `color` is a `ColorArg` (static or per-frame `(f) => Color`), `alpha` per-frame; sig-rebuilds when any vertex moves. Use instead of `draw` + a hand-built tri mesh.
 - `label(key, pos, text, opts?)` — a 3D-anchored, screen-fixed text label with a rounded-rect backdrop pill. Sits on a 3D point (`pos`, resolved each frame so it follows the anchor) and stays a CONSTANT on-screen size by compensating the Sprite scale for the OrbitCam dolly (`baseSize / camera.zoom`). `opts`: `{ color?, backdrop?=true, backdropColor?, size?=0.14, alpha? }`.
 - `draw(key, object: THREE.Object3D, alpha)` — **custom primitive**: you supply any
   THREE object (Group/Mesh/LineSegments you built); the library retains it by key

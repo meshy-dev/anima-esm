@@ -55,6 +55,14 @@ export type FigCtx = {
   line(key: string, a: FigPos, b: FigPos, color: ColorArg, alpha: number): void;
   bar(key: string, a: FigPos, b: FigPos, radius: number, color: ColorArg, alpha: number): void;
   quad(key: string, verts: FigPos[], color: ColorArg, alpha: number): void;
+  /** Filled triangle list (a triangle soup): each triangle is 3 {@link FigPos}
+   *  (a vector or a node key). One non-indexed BufferGeometry (3 verts/tri, no
+   *  vertex sharing), MeshBasicMaterial DoubleSide transparent; `color` is a
+   *  {@link ColorArg} (static or per-frame `(f) => Color`), `alpha` is per-frame.
+   *  The geometry sig-rebuilds when any vertex moves (like {@link quad}); the
+   *  library disposes the geometry on sig-change/drop. Use this instead of
+   *  `draw` + a hand-built tri mesh for filled triangle lists. */
+  triangles(key: string, tris: FigPos[][], color: ColorArg, alpha: number): void;
   /** Custom primitive: the library calls `factory()` once on first draw to build
    *  a THREE.Object3D, retains it by `key`, and each frame resolves `pos` (a vector
    *  or a node key), sets `object.position`, `object.visible = alpha > 0.001`, and

@@ -239,6 +239,18 @@ export function createFigure(
       g.setIndex([0, 1, 2, 0, 2, 3]);
       return g;
     };
+    const trisGeo = (tris: THREE.Vector3[][]): THREE.BufferGeometry => {
+      const g = new THREE.BufferGeometry();
+      const arr = new Float32Array(tris.length * 9);
+      tris.forEach((t, i) => {
+        for (let j = 0; j < 3; j++) {
+          const p = t[j], k = (i * 3 + j) * 3;
+          arr[k] = p.x; arr[k + 1] = p.y; arr[k + 2] = p.z;
+        }
+      });
+      g.setAttribute("position", new THREE.BufferAttribute(arr, 3));
+      return g;
+    };
 
     // ctx BUFFERS during draw(): nodes and draw calls are recorded and only
     // reconciled AFTER draw returns, because positions may be node keys
@@ -254,6 +266,7 @@ export function createFigure(
       | { kind: "line"; key: string; a: FigPos; b: FigPos; color: ColorArg; alpha: number }
       | { kind: "bar"; key: string; a: FigPos; b: FigPos; radius: number; color: ColorArg; alpha: number }
       | { kind: "quad"; key: string; verts: FigPos[]; color: ColorArg; alpha: number }
+      | { kind: "triangles"; key: string; tris: FigPos[][]; color: ColorArg; alpha: number }
       | { kind: "draw"; key: string; factory: () => THREE.Object3D; pos: FigPos; alpha: number; colorFn?: (f: Frame) => THREE.Color }
       | { kind: "label"; key: string; pos: FigPos; text: string; color: THREE.Color; backdrop: boolean; backdropColor: THREE.Color; size: number; alpha: number };
     const nodePlaces = new Map<string, NodePlace>();
@@ -385,6 +398,28 @@ export function createFigure(
         const m = e.mat!;
         m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
+      } else if (dc.kind === "triangles") {
+        const tris = dc.tris.map((t) => t.map(resolveFigPos));
+        if (tris.some((t) => t.some((v) => !v))) return;
+        const flat = tris as THREE.Vector3[][];
+        drawnThisFrame.add(dc.key);
+        const col = evalColor(dc.color, f);
+        const s = sig(flat.flat());
+        let e = retained.get(dc.key);
+        if (!e) {
+          const mat = new THREE.MeshBasicMaterial({ color: col.clone(), transparent: true, opacity: 0, side: THREE.DoubleSide });
+          const obj = new THREE.Mesh(trisGeo(flat), mat);
+          scene.add(obj);
+          e = { obj, mat, kind: "triangles", ownsGeo: true, sig: s };
+          retained.set(dc.key, e);
+        } else if (e.sig !== s) {
+          (e.obj as THREE.Mesh).geometry.dispose();
+          (e.obj as THREE.Mesh).geometry = trisGeo(flat);
+          e.sig = s;
+        }
+        const m = e.mat!;
+        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
+        e.obj.visible = dc.alpha > 0.001;
       } else if (dc.kind === "label") {
         // 3D-anchored, screen-fixed text label: position is the resolved 3D
         // anchor (follows the corner); apparent on-screen SIZE is held
@@ -451,6 +486,7 @@ export function createFigure(
       line(key, a, b, color, alpha) { drawCalls.push({ kind: "line", key: full(key), a, b, color, alpha }); },
       bar(key, a, b, radius, color, alpha) { drawCalls.push({ kind: "bar", key: full(key), a, b, radius, color, alpha }); },
       quad(key, verts, color, alpha) { drawCalls.push({ kind: "quad", key: full(key), verts, color, alpha }); },
+      triangles(key, tris, color, alpha) { drawCalls.push({ kind: "triangles", key: full(key), tris, color, alpha }); },
       draw(key, factory, pos, alpha, colorFn) { drawCalls.push({ kind: "draw", key: full(key), factory, pos, alpha, colorFn }); },
       label(key, pos, text, opts) { drawCalls.push({ kind: "label", key: full(key), pos, text, color: opts?.color ?? LABEL_DEFAULT_COLOR, backdrop: opts?.backdrop ?? true, backdropColor: opts?.backdropColor ?? LABEL_DEFAULT_BACKDROP, size: opts?.size ?? LABEL_DEFAULT_SIZE, alpha: opts?.alpha ?? 1 }); },
       scope(prefix, fn) { stack.push(prefix); fn(); stack.pop(); },
