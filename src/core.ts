@@ -150,7 +150,16 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     // lifecycle (they built the THREE.Object3D), so we only scene.remove it (the
     // caller does that) and dispose nothing here.
     const disposeEntry = (e: FigEntry) => {
-      if (e.kind === "draw") return;
+      if (e.kind === "draw") {
+        // factory-built: the library owns the object -> dispose its geometry + materials.
+        e.obj.traverse((o) => {
+          const m = o as THREE.Mesh & { geometry?: THREE.BufferGeometry; material?: THREE.Material | THREE.Material[] };
+          m.geometry?.dispose();
+          const mat = m.material;
+          if (mat) (Array.isArray(mat) ? mat : [mat]).forEach((mm) => mm.dispose());
+        });
+        return;
+      }
       if (e.ownsGeo) (e.obj as THREE.Mesh | THREE.Line | THREE.LineSegments).geometry.dispose();
       e.mat!.dispose();
     };
@@ -171,14 +180,15 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
     const stack: string[] = [];
     const full = (key: string): string => (stack.length ? stack.join("/") + "/" + key : key);
     // Buffered draw calls (generic primitives only — no domain primitives).
-    // `draw` carries a consumer-built THREE.Object3D retained by key (custom
-    // primitive mechanism): the library owns only its scene membership + alpha.
+    // `draw` carries a FACTORY (called once on first draw) + a FigPos (resolved
+    // each frame); the library builds + retains the object, sets its position,
+    // and owns its geometry/material lifecycle (disposes on drop).
     type DrawCall =
       | { kind: "sphere"; key: string; pos: FigPos; radius: number; color: THREE.Color; alpha: number }
       | { kind: "line"; key: string; a: FigPos; b: FigPos; color: THREE.Color; alpha: number }
       | { kind: "bar"; key: string; a: FigPos; b: FigPos; radius: number; color: THREE.Color; alpha: number }
       | { kind: "quad"; key: string; verts: FigPos[]; color: THREE.Color; alpha: number }
-      | { kind: "draw"; key: string; object: THREE.Object3D; alpha: number };
+      | { kind: "draw"; key: string; factory: () => THREE.Object3D; pos: FigPos; alpha: number };
     const nodePlaces = new Map<string, NodePlace>();
     const drawCalls: DrawCall[] = [];
     const resolved = new Map<string, THREE.Vector3>(); // memo: resolved node world positions
@@ -304,24 +314,21 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
         const m = e.mat!;
         m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
-      } else { // draw: consumer-built THREE.Object3D, retained by key.
+      } else { // draw: factory-built THREE.Object3D, retained by key; library sets position + alpha.
+        const pos = resolveFigPos(dc.pos);
+        if (!pos) return;
         drawnThisFrame.add(dc.key);
         let e = retained.get(dc.key);
         if (!e) {
-          scene.add(dc.object);
-          e = { obj: dc.object, kind: "draw", ownsGeo: false, sig: "" };
+          const obj = dc.factory();
+          scene.add(obj);
+          e = { obj, kind: "draw", ownsGeo: true, sig: "" };
           retained.set(dc.key, e);
-        } else if (e.obj !== dc.object) {
-          // consumer swapped the object for this key: drop the old (the consumer
-          // owns it — we do NOT dispose), retain the new.
-          scene.remove(e.obj);
-          scene.add(dc.object);
-          e.obj = dc.object;
         }
+        e.obj.position.copy(pos);
         const a = clamp01(dc.alpha);
-        dc.object.visible = dc.alpha > 0.001;
-        // best-effort: apply per-frame alpha to every material in the object.
-        dc.object.traverse((o) => {
+        e.obj.visible = dc.alpha > 0.001;
+        e.obj.traverse((o) => {
           const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
           if (!mat) return;
           const mats = Array.isArray(mat) ? mat : [mat];
@@ -335,7 +342,7 @@ export function createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette
       line(key, a, b, color, alpha) { drawCalls.push({ kind: "line", key: full(key), a, b, color, alpha }); },
       bar(key, a, b, radius, color, alpha) { drawCalls.push({ kind: "bar", key: full(key), a, b, radius, color, alpha }); },
       quad(key, verts, color, alpha) { drawCalls.push({ kind: "quad", key: full(key), verts, color, alpha }); },
-      draw(key, object, alpha) { drawCalls.push({ kind: "draw", key: full(key), object, alpha }); },
+      draw(key, factory, pos, alpha) { drawCalls.push({ kind: "draw", key: full(key), factory, pos, alpha }); },
       scope(prefix, fn) { stack.push(prefix); fn(); stack.pop(); },
     };
 

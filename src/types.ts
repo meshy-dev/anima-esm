@@ -33,12 +33,12 @@ export type FigCtx = {
   line(key: string, a: FigPos, b: FigPos, color: THREE.Color, alpha: number): void;
   bar(key: string, a: FigPos, b: FigPos, radius: number, color: THREE.Color, alpha: number): void;
   quad(key: string, verts: FigPos[], color: THREE.Color, alpha: number): void;
-  /** Custom primitive: retain a consumer-built THREE.Object3D by `key`. The
-   *  library adds it to the scene on first draw, reuses it on update, removes it
-   *  on drop, and each frame sets `object.visible = alpha > 0.001` and traverses
-   *  materials to set `transparent + opacity = alpha` (best-effort). The consumer
-   *  owns the object's geometry/material lifecycle. */
-  draw(key: string, object: THREE.Object3D, alpha: number): void;
+  /** Custom primitive: the library calls `factory()` once on first draw to build
+   *  a THREE.Object3D, retains it by `key`, and each frame resolves `pos` (a vector
+   *  or a node key), sets `object.position`, `object.visible = alpha > 0.001`, and
+   *  traverses materials to set `transparent + opacity = alpha`. On drop the
+   *  library disposes the object's geometry + materials (it built them). */
+  draw(key: string, factory: () => THREE.Object3D, pos: FigPos, alpha: number): void;
   scope(prefix: string, fn: () => void): void;
 };
 
