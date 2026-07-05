@@ -641,7 +641,7 @@ export function createFigure(
       // projection) on top; the HUD pass does not clear, so it draws over the
       // main pass without wiping it.
       const fx = FR / controls.zoom;
-      const proj = ortho(-fx, fx, fx, -fx, 0.1, 100);
+      const proj = ortho(-fx, fx, -fx, fx, 0.1, 100);
       const mvp = mul(proj, controls.view);
       glr.drawRange(mvp, 0, sceneEnd, true, true);
       glr.drawRange(IDENTITY, sceneEnd, glr.records.length, false, false);
