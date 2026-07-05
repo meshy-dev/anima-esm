@@ -1,20 +1,11 @@
-// anima-esm — PUBLIC type surface. ZERO three.js leakage: positions are plain
-// `Vec3` tuples and colors are plain `Color` (hex string | rgb tuple), both
-// re-exported from ./helpers. No `THREE.*` symbol appears in this file.
+// anima-esm — PUBLIC type surface. Positions are plain `Vec3` tuples and colors
+// are plain `Color` (hex string | rgb tuple), both re-exported from ./helpers.
+// No renderer-internal type leaks into this public surface.
 
 import type { Vec3, Color } from "./helpers";
 
 /** A keyframe: an absolute timestamp (seconds) plus the caption shown from it. */
 export type Keyframe = { at: number; caption: string };
-
-/** A timeline step for the legacy {@link setupAnimEngine}. */
-export type Step = {
-  /** Step duration in seconds. */
-  dur: number;
-  caption: string;
-  /** Per-group target opacities, eased over the step duration. */
-  anims: ReadonlyArray<{ g: string; to: number }>;
-};
 
 /** A 3D position argument: a plain `Vec3` tuple. */
 export type FigPos = Vec3;
@@ -28,17 +19,18 @@ export type LabelOpts = {
   /** Pill fill RGB; the ~0.6 alpha is applied by the library (default dark). */
   backdropColor?: Color;
   /** Base world size at camera.zoom==1 (default ~0.14); the apparent on-screen
-   *  size is held constant by compensating the Sprite scale for the OrbitCam dolly. */
+   *  size is held constant by compensating the label quad for the OrbitCam dolly. */
   size?: number;
   /** Per-frame alpha like the other primitives (default 1). */
   alpha?: number;
 };
 
 /** Immediate-mode draw context handed to {@link FigSpec.draw} each frame. Every
- *  call builds its three.js object RIGHT NOW into a per-frame group, renders, then
- *  the group is discarded — nothing is retained across frames (no key registry,
- *  no node graph, no reconcile pass). Each method returns its first input `Vec3`
- *  so a spec can chain an anchor off a just-drawn primitive.
+ *  call appends its vertices RIGHT NOW into the per-frame VBO + draw-record list
+ *  (one draw call per primitive); the list is rendered then reset — nothing is
+ *  retained across frames (no key registry, no node graph, no reconcile pass).
+ *  Each method returns its first input `Vec3` so a spec can chain an anchor off
+ *  a just-drawn primitive.
  *
  *  Depth modes (a per-draw-call mode stack, outermost pushed first):
  *
@@ -57,16 +49,15 @@ export type FigCtx = {
   bar(a: FigPos, b: FigPos, radius: number, color: Color, alpha: number): Vec3;
   quad(verts: FigPos[], color: Color, alpha: number): Vec3;
   /** Filled triangle list (a triangle soup): each triangle is 3 {@link FigPos}.
-   *  One non-indexed BufferGeometry (3 verts/tri, no vertex sharing),
-   *  MeshBasicMaterial DoubleSide transparent; `color` is a {@link Color},
-   *  `alpha` is per-frame. */
+   *  Non-indexed (3 verts/tri, no vertex sharing), double-sided; `color` is a
+   *  {@link Color}, `alpha` is per-frame. */
   triangles(tris: FigPos[][], color: Color, alpha: number): Vec3;
   /** 3D-anchored, screen-fixed text label with a rounded-rect backdrop pill.
-   *  It sits on a 3D point (its anchor `pos`), stays a CONSTANT on-screen size
-   *  by compensating the Sprite scale for the OrbitCam dolly (camera.zoom),
-   *  renders in the main scene on top (depthTest off) so it survives the
-   *  WebM/WebP export, and applies per-frame `opts.alpha` to the SpriteMaterial
-   *  opacity. See {@link LabelOpts}. */
+   *  It sits on a 3D point (its anchor `pos`), is billboarded to face the camera,
+   *  and stays a CONSTANT on-screen size by compensating the quad for the OrbitCam
+   *  dolly (camera.zoom). It renders on top (depthTest off, depthWrite off) so it
+   *  survives the WebM/WebP export; per-frame `opts.alpha` scales its opacity.
+   *  See {@link LabelOpts}. */
   label(pos: FigPos, text: string, opts?: LabelOpts): Vec3;
   /** Collect primitives issued inside `fn`, sort them back-to-front by centroid
    *  distance to the camera (far first), and draw in that order with

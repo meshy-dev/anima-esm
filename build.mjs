@@ -1,18 +1,18 @@
-// anima-esm build: 3 ESM bundles (+ debug + gz). three.js is an external peer
-// dep (the consumer's importmap resolves it). The vanilla CORE (anima.min.mjs)
-// has zero React + zero muxer code -- the muxers (mediabunny + webp_anim) ship
-// as a separate lazy bundle (anima-muxers.min.mjs) that the core dynamic-imports
-// on download. The optional React wrapper (anima-react.min.mjs) imports react
-// (external).
+// anima-esm build: 3 ESM bundles (+ debug + gz). The core uses its own
+// WebGL2/GLES3 renderer (no three.js dependency at all). The vanilla CORE
+// (anima.min.mjs) has zero React + zero muxer code -- the muxers (mediabunny
+// + webp_anim) ship as a separate lazy bundle (anima-muxers.min.mjs) that the
+// core dynamic-imports on download. The optional React wrapper
+// (anima-react.min.mjs) imports react (external).
 import { build } from "esbuild";
 import { readFileSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
 const common = { format: "esm", bundle: true, sourcemap: false, logLevel: "info" };
 
-const extCore = ["three", "anima-esm/muxers"];
-const extMuxers = ["three"];
-const extReact = ["react", "react-dom", "react-dom/client", "three", "anima-esm/muxers"];
+const extCore = ["anima-esm/muxers"];
+const extMuxers = [];
+const extReact = ["react", "react-dom", "react-dom/client", "anima-esm/muxers"];
 
 // Vanilla core: no react, no muxers (the download handlers `await import("anima-esm/muxers")`).
 await build({ ...common, entryPoints: ["src/index.ts"], external: extCore, outfile: "dist/anima.min.mjs", minify: true });

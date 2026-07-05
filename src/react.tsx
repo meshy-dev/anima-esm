@@ -2,8 +2,9 @@
 // This is the ONLY React in the library. The core bundle (anima.min.mjs) does
 // not import react; only this wrapper (anima-react.min.mjs) does.
 //
-// React, react-dom, and three are peer dependencies the consumer provides
-// (e.g. via an importmap). The core engine + muxers are bundled inline.
+// React and react-dom are optional peer dependencies the consumer provides
+// (e.g. via an importmap). The core engine (WebGL2/GLES3 renderer, no three.js)
+// + muxers are bundled inline.
 
 import React, { useEffect, useRef } from "react";
 import { createFigure, type FigSpec, type Palette } from "./core";

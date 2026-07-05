@@ -37,7 +37,8 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
-    "three": ">=0.160"
+    "react": ">=18",
+    "react-dom": ">=18"
   },
   "peerDependenciesMeta": {
     "react": { "optional": true },
@@ -46,11 +47,10 @@
   "devDependencies": {
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@types/three": "^0.185.0",
     "esbuild": "^0.28.1",
+    "mediabunny": "^1.50.6",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "three": "^0.185.1",
     "typescript": "^6.0.3"
   },
   "engines": { "node": ">=20" }

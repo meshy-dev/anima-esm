@@ -1,57 +1,69 @@
 // Minimal orbital camera control — a drop-in for the subset of three's
 // OrbitControls that anima-esm uses (drag to rotate around a target, wheel to
-// dolly, optional auto-rotate + damping), implemented with ONLY the three core
-// so the bundle does NOT leak a bare `three/examples/...` import that consumers
-// would have to remap in their importmap. The camera orbits the target in
-// spherical coordinates (radius, polar phi, azimuth theta); dolly is the
-// orthographic camera's `zoom` (clamped to [minZoom, maxZoom]).
-import * as THREE from "three";
+// dolly, optional auto-rotate + damping), implemented with NO three.js so the
+// bundle carries no three dependency. The camera orbits the target in
+// spherical coordinates (radius, polar phi, azimuth theta); dolly is an
+// orthographic `zoom` (clamped to [minZoom, maxZoom]) that the renderer folds
+// into the projection. After {@link update}, read {@link view} (the world->camera
+// matrix), {@link pos}, {@link zoom}, and {@link right}/{@link up} (the camera's
+// world-space basis vectors used to billboard labels).
+
+import { lookAt, sphericalPos, type Mat4 } from "./mat";
+import type { Vec3 } from "./helpers";
 
 const EPS = 0.1; // clamp the polar angle away from the poles to avoid gimbal flip
 
 export class OrbitCam {
-  camera: THREE.OrthographicCamera;
   domElement: HTMLElement;
-  target = new THREE.Vector3();
+  target: Vec3 = [0, 0, 0];
   enableDamping = false;
   dampingFactor = 0.08;
-  enablePan = false; // accepted for API parity with three's OrbitControls; not implemented
+  enablePan = false; // accepted for API parity; not implemented
   autoRotate = false;
   autoRotateSpeed = 1.0;
   minZoom = 0.5;
   maxZoom = 4;
 
-  private theta = 0; private phi = 0;       // current (damped) angles
-  private thetaT = 0; private phiT = 0;     // target angles (drag/auto-rotate write here)
-  private radius = 1;                        // orbit radius (orthographic: view-independent, kept for the position)
-  private zoomT: number;                      // target dolly (camera.zoom)
-  private inited = false;
+  private theta = 0; private phi = 0;     // current (damped) angles
+  private thetaT = 0; private phiT = 0;   // target angles (drag/auto-rotate write here)
+  private radius = 1;                     // orbit radius (orthographic: view-independent)
+  private zoomT: number;                  // target dolly
   private dragging = false;
   private px = 0; private py = 0;
   private disposed = false;
 
-  constructor(camera: THREE.OrthographicCamera, domElement: HTMLElement) {
-    this.camera = camera;
+  // Outputs (valid after update()):
+  /** Camera position in world space. */
+  pos: Vec3 = [0, 0, 0];
+  /** Current (damped) orthographic zoom — folded into the projection by the
+   *  renderer and used to hold labels at a constant on-screen size. */
+  zoom = 1;
+  /** World->camera view matrix (column-major Mat4). */
+  view: Mat4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  /** Camera right / up basis vectors in world space (unit), for billboarding. */
+  right: Vec3 = [1, 0, 0];
+  up: Vec3 = [0, 1, 0];
+
+  constructor(domElement: HTMLElement, pos: Vec3, target: Vec3, zoom = 1) {
     this.domElement = domElement;
-    this.zoomT = camera.zoom;
+    this.target = [target[0], target[1], target[2]];
+    this.zoomT = zoom;
+    this.zoom = zoom;
     domElement.style.cursor = "grab";
     domElement.addEventListener("pointerdown", this.onDown);
     domElement.addEventListener("wheel", this.onWheel, { passive: false });
     window.addEventListener("pointermove", this.onMove);
     window.addEventListener("pointerup", this.onUp);
+    // Seed the spherical state from the initial position relative to the
+    // target so the first update() matches the spec's camera pose.
+    const off = [pos[0] - target[0], pos[1] - target[1], pos[2] - target[2]] as Vec3;
+    this.radius = Math.hypot(off[0], off[1], off[2]) || 1;
+    this.phi = Math.acos(Math.max(-1, Math.min(1, off[1] / this.radius)));
+    this.theta = Math.atan2(off[2], off[0]);
+    this.thetaT = this.theta; this.phiT = this.phi;
   }
 
-  // Lazy init on the first update(): the target is set by the caller AFTER
-  // construction (controls.target.copy(...)), so derive the spherical state
-  // from the camera's current position relative to the target on first use.
-  private init() {
-    const off = new THREE.Vector3().subVectors(this.camera.position, this.target);
-    this.radius = off.length() || 1;
-    const s = new THREE.Spherical().setFromVector3(off);
-    this.theta = this.thetaT = s.theta;
-    this.phi = this.phiT = s.phi;
-    this.inited = true;
-  }
+  setTarget(t: Vec3): void { this.target = [t[0], t[1], t[2]]; }
 
   private onDown = (e: PointerEvent) => {
     this.dragging = true; this.px = e.clientX; this.py = e.clientY;
@@ -73,7 +85,6 @@ export class OrbitCam {
   };
 
   update = () => {
-    if (!this.inited) this.init();
     if (this.autoRotate && !this.dragging) this.thetaT -= this.autoRotateSpeed * 0.002;
     if (this.enableDamping) {
       this.theta += (this.thetaT - this.theta) * this.dampingFactor;
@@ -81,15 +92,15 @@ export class OrbitCam {
     } else {
       this.theta = this.thetaT; this.phi = this.phiT;
     }
-    const s = new THREE.Spherical(this.radius, this.phi, this.theta);
-    this.camera.position.copy(this.target).add(new THREE.Vector3().setFromSpherical(s));
-    this.camera.lookAt(this.target);
-    const z = this.enableDamping
-      ? this.camera.zoom + (this.zoomT - this.camera.zoom) * this.dampingFactor
-      : this.zoomT;
-    if (Math.abs(z - this.camera.zoom) > 1e-5) {
-      this.camera.zoom = z;
-      this.camera.updateProjectionMatrix();
+    this.pos = sphericalPos(this.target, this.radius, this.phi, this.theta);
+    this.view = lookAt(this.pos, this.target, [0, 1, 0]);
+    // Camera right / up = columns 0 / 1 of the view matrix (world-space basis).
+    this.right = [this.view[0], this.view[1], this.view[2]];
+    this.up = [this.view[4], this.view[5], this.view[6]];
+    if (this.enableDamping) {
+      this.zoom += (this.zoomT - this.zoom) * this.dampingFactor;
+    } else {
+      this.zoom = this.zoomT;
     }
   };
 

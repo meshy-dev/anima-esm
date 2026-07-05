@@ -1,16 +1,17 @@
-// Pure-JS animated WebP muxer. Assembles a RIFF/VP8X/ANIM/ANMF container from an
-// array of single-frame WebP blobs produced by canvas.toBlob('image/webp', q)
-// (browser-native VP8 encode -- Chrome/Edge). Each input is a complete WebP file
-// (RIFF/WEBP + a VP8 or VP8L bitstream, optionally an ALPH chunk); the muxer
-// extracts the bitstream(s) and wraps them as ANMF frame data. No wasm, no fetch
-// -- fully self-contained. Spec: developers.google.com/speed/webp/docs/riff_container
+// Pure-JS animated WebP muxer (first-party). Assembles a RIFF/VP8X/ANIM/ANMF
+// container from an array of single-frame WebP blobs produced by
+// canvas.toBlob('image/webp', q) (browser-native VP8 encode -- Chrome/Edge).
+// Each input is a complete WebP file (RIFF/WEBP + a VP8 or VP8L bitstream,
+// optionally an ALPH chunk); the muxer extracts the bitstream(s) and wraps them
+// as ANMF frame data. No wasm, no fetch -- fully self-contained.
+// Spec: developers.google.com/speed/webp/docs/riff_container
 
 // 24-bit little-endian (raw value).
-const u24 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255];
+const u24 = (v: number): [number, number, number] => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255];
 
 // Build a RIFF chunk: FourCC(4) + uint32 size(4) + data + 1 pad byte if odd.
 // The pad byte is 0 (Uint8Array zero-fills), as RIFF requires.
-const chunk = (fcc, data) => {
+const chunk = (fcc: string, data: Uint8Array): Uint8Array => {
   const pad = data.length & 1;
   const out = new Uint8Array(8 + data.length + pad);
   out[0] = fcc.charCodeAt(0); out[1] = fcc.charCodeAt(1);
@@ -22,7 +23,7 @@ const chunk = (fcc, data) => {
 };
 
 // Concatenate Uint8Arrays.
-const concat = (arrs) => {
+const concat = (arrs: Uint8Array[]): Uint8Array => {
   let len = 0;
   for (const a of arrs) len += a.length;
   const out = new Uint8Array(len);
@@ -34,8 +35,8 @@ const concat = (arrs) => {
 // Parse a single-frame WebP file -> { alph, bs, bsFcc }.
 // Iterates RIFF chunks after the 12-byte RIFF/WEBP header, capturing the alpha
 // bitstream (ALPH) and the image bitstream (VP8 lossy or VP8L lossless).
-const parseFrame = (webp) => {
-  let off = 12, alph = null, bs = null, bsFcc = "";
+const parseFrame = (webp: Uint8Array): { alph: Uint8Array | null; bs: Uint8Array; bsFcc: string } => {
+  let off = 12, alph: Uint8Array | null = null, bs: Uint8Array | null = null, bsFcc = "";
   while (off + 8 <= webp.length) {
     const fcc = String.fromCharCode(webp[off], webp[off + 1], webp[off + 2], webp[off + 3]);
     const size = webp[off + 4] | (webp[off + 5] << 8) | (webp[off + 6] << 16) | (webp[off + 7] << 24);
@@ -46,18 +47,25 @@ const parseFrame = (webp) => {
     else if (fcc === "VP8 " || fcc === "VP8L") { bs = webp.subarray(dataStart, dataEnd); bsFcc = fcc; }
     off = dataEnd + (size & 1); // skip the pad byte when the chunk size is odd
   }
-  if (!bs) throw new Error("webp_anim: frame has no VP8/VP8L bitstream");
+  if (!bs) throw new Error("webp-anim: frame has no VP8/VP8L bitstream");
   return { alph, bs, bsFcc };
 };
 
-// Mux an animated WebP from single-frame WebP blobs.
-//   frames    : Uint8Array[] -- each a complete WebP file from toBlob('image/webp')
-//   width     : canvas width in pixels (every frame is full-canvas)
-//   height    : canvas height in pixels
-//   delayMs   : per-frame duration in milliseconds (raw, not 1-based)
-//   loopCount : animation loop count (0 = infinite)
-// Returns a Uint8Array containing the animated WebP file.
-export const muxAnimatedWebP = (frames, width, height, delayMs, loopCount = 0) => {
+/** Mux an animated WebP from single-frame WebP blobs.
+ *
+ *  - `frames`    : each a complete WebP file from toBlob('image/webp')
+ *  - `width`/`height` : canvas size in pixels (every frame is full-canvas)
+ *  - `delayMs`   : per-frame duration in milliseconds (raw, not 1-based)
+ *  - `loopCount` : animation loop count (0 = infinite)
+ *
+ *  Returns a Uint8Array containing the animated WebP file. */
+export const muxAnimatedWebP = (
+  frames: Uint8Array[],
+  width: number,
+  height: number,
+  delayMs: number,
+  loopCount = 0,
+): Uint8Array<ArrayBuffer> => {
   const parsed = frames.map(parseFrame);
   const anyAlpha = parsed.some((p) => p.alph != null);
   // VP8X (10 bytes): flags byte + 24-bit reserved 0 + Canvas Width Minus One +

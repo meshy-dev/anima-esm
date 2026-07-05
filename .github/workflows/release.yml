@@ -44,9 +44,34 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry_1.outputs.page_url || steps.deployment_retry_2.outputs.page_url }}
     steps:
       # deploy-pages intermittently fails with "Deployment failed, try again
-      # later" — a transient GitHub Pages API hiccup (unrelated to this repo's
-      # content). Retry up to 3 attempts; the job fails only if all 3 fail.
+      # later" straight from the Pages backend even when the uploaded artifact
+      # is valid (actions/deploy-pages#406, recurring since 2026-01). The failure
+      # is transient — the same commit deploys cleanly on a manual re-run — so a
+      # single attempt turns a GitHub-side hiccup into a red deploy. Retry the
+      # deploy step up to 3 times (with a short back-off); the first two attempts
+      # use continue-on-error so a later success does not mark the job failed,
+      # and only the final attempt is allowed to fail the job. Each retry re-
+      # invokes the action against the already-uploaded artifact (equivalent to
+      # hitting "Re-run" by hand), never re-uploading (which would create a
+      # duplicate github-pages artifact). The environment url falls through to
+      # whichever attempt produced a page_url. Note: tuning the action's own
+      # timeout / error_count would not help — this is an immediate error
+      # status, not a polling timeout, so the whole action call must be retried.
       - id: deployment
+        uses: actions/deploy-pages@v5.0.0
+        continue-on-error: true
+      - name: Back off before retry
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+      - id: deployment_retry_1
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v5.0.0
+        continue-on-error: true
+      - name: Back off before final retry
+        if: steps.deployment.outcome == 'failure' && steps.deployment_retry_1.outcome == 'failure'
+        run: sleep 60
+      - id: deployment_retry_2
+        if: steps.deployment.outcome == 'failure' && steps.deployment_retry_1.outcome == 'failure'
         uses: actions/deploy-pages@v5.0.0
 
   publish-npm:

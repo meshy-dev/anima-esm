@@ -1,16 +1,17 @@
 # anima-esm
 
 Immediate-mode 3D animation framework. A vanilla core (`createFigure`) drives a
-retained-by-key three.js scene from a `draw(ctx, f)` closure; React is an optional
-thin wrapper. Ships WebM (AV1, WebCodecs + mediabunny) and animated WebP export —
-the muxers are a separate lazy bundle so the core stays tiny.
+custom WebGL2 / GLES3 renderer (Dear-ImGui-style — one shader, one VBO re-uploaded
+per frame, a short draw-record list; no three.js) from a `draw(ctx, f)` closure;
+React is an optional thin wrapper. Ships WebM (AV1, WebCodecs + mediabunny) and
+animated WebP export — the muxers are a separate lazy bundle so the core stays tiny.
 
-- **Vanilla core** — `anima.min.mjs` (~30 KB, zero React, zero muxer code).
+- **Vanilla core** — `anima.min.mjs` (~25 KB, zero React, zero muxer, zero three.js — ships its own WebGL2/GLES3 renderer).
 - **Muxers** (lazy) — `anima-muxers.min.mjs` (mediabunny WebM + animated WebP,
   tree-shaken); loaded on demand only when the user clicks download.
 - **React wrapper** (optional) — `anima-react.min.mjs` (`<Figure>` over `createFigure`).
 
-`three` is the only hard peer dependency. `react`/`react-dom` are optional peers.
+No three.js — the core ships its own WebGL2/GLES3 immediate-mode renderer. `react`/`react-dom` are optional peers.
 
 ## Bundles
 
@@ -27,7 +28,6 @@ Use the `.debug.mjs` variants (tree-shaken, readable) for development.
 ```html
 <script type="importmap">
 { "imports": {
-  "three": "https://esm.sh/three@0.160.0",
   "anima-esm": "https://meshy-dev.github.io/anima-esm/anima.min.mjs",
   "anima-esm/muxers": "https://meshy-dev.github.io/anima-esm/anima-muxers.min.mjs"
 } }
@@ -66,7 +66,6 @@ The muxers bundle loads only when the user clicks the in-canvas download button
 { "imports": {
   "react": "https://esm.sh/react@18.3.1",
   "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
-  "three": "https://esm.sh/three@0.160.0",
   "anima-esm": "https://meshy-dev.github.io/anima-esm/anima.min.mjs",
   "anima-esm/muxers": "https://meshy-dev.github.io/anima-esm/anima-muxers.min.mjs",
   "anima-esm/react": "https://meshy-dev.github.io/anima-esm/anima-react.min.mjs"
@@ -82,47 +81,52 @@ createRoot(document.getElementById("mount")!).render(<Figure spec={spec} />);
 ## Public API (core)
 
 `createFigure(spec: FigSpec, mount: HTMLElement, opts?: { palette?: Palette }): FigureController`
-creates the canvas, scene, OrbitControls (auto-rotate), in-canvas caption, the
+creates the canvas, WebGL2 renderer, OrbitCam (auto-rotate), in-canvas caption, the
 download menu, and the rAF render loop inside `mount`. Returns a controller:
 `{ dispose(), play(), pause(), replay(), isPaused() }`.
 
 ### `FigSpec`
 - `keyframe_timestamps: Keyframe[]` — cumulative `{ at: number; caption: string }`
   timestamps; N entries → N-1 animated segments + a final hold.
-- `camera: { pos: [number,number,number] | THREE.Vector3; target: same; frustum: number }`
+- `camera: { pos: [number,number,number]; target: [number,number,number]; frustum: number }`
 - `draw(ctx: FigCtx, f: Frame): void` — the immediate-mode scene, called every frame.
 - `name?: string` — used as the export filename.
 
-### `FigCtx` — immediate-mode primitives (retained by key)
-- `node(key, place)` — declare a positional node: `{ abs: Vec3 }` (absolute) or
-  `{ from: parentKey, offset: Vec3 }` (relative). Positions are resolved
-  topologically each frame; other primitives reference nodes by key.
-- `line(key, a, b, color, alpha)` — thin line between two positions (Vec3 or node key).
-- `bar(key, a, b, radius, color, alpha)` — oriented cylinder a→b.
-- `sphere(key, pos, radius, color, alpha)` — a sphere.
-- `quad(key, verts, color, alpha)` — a filled quad (`verts`: 4 positions).
-- `triangles(key, tris, color, alpha)` — a filled triangle list (soup); `tris` is an array of triangles, each `[a, b, c]` of positions. Non-indexed geometry, DoubleSide; `color` is a `ColorArg` (static or per-frame `(f) => Color`), `alpha` per-frame; sig-rebuilds when any vertex moves. Use instead of `draw` + a hand-built tri mesh.
-- `label(key, pos, text, opts?)` — a 3D-anchored, screen-fixed text label with a rounded-rect backdrop pill. Sits on a 3D point (`pos`, resolved each frame so it follows the anchor) and stays a CONSTANT on-screen size by compensating the Sprite scale for the OrbitCam dolly (`baseSize / camera.zoom`). `opts`: `{ color?, backdrop?=true, backdropColor?, size?=0.14, alpha? }`.
-- `draw(key, object: THREE.Object3D, alpha)` — **custom primitive**: you supply any
-  THREE object (Group/Mesh/LineSegments you built); the library retains it by key
-  and sets `visible` + per-material `opacity` from `alpha`. Build your own domain
-  markers (a 3-axis cross, a wireframe box, …) out of three.js + `ctx.draw` — the
-  library ships only generic primitives.
-- `color(name)` — read a palette color (`accent`, `accent2`, `ink`, …).
-- `scope(prefix, fn)` — push a key prefix for a sub-tree (keys are namespaced).
+### `FigCtx` — immediate-mode primitives (no keys, no retention)
+- `sphere(pos, radius, color, alpha)` — a sphere (FrontSide; back faces culled).
+- `line(a, b, color, alpha)` — a thin 1px line between two `Vec3` positions.
+- `bar(a, b, radius, color, alpha)` — an oriented cylinder a→b.
+- `quad(verts, color, alpha)` — a filled quad (`verts`: 4 `Vec3`), DoubleSide.
+- `triangles(tris, color, alpha)` — a filled triangle soup; `tris` is an array of
+  triangles, each `[a, b, c]` of `Vec3`. Non-indexed, DoubleSide. Use this for any
+  hand-built tri mesh.
+- `label(pos, text, opts?)` — a 3D-anchored, screen-fixed text label with a
+  rounded-rect backdrop pill. Sits on the 3D point `pos`, billboarded to face the
+  camera, and stays a CONSTANT on-screen size by compensating the quad for the
+  OrbitCam dolly (`size / camera.zoom`). `opts`: `{ color?, backdrop?=true, backdropColor?, size?=0.14, alpha? }`.
+- `depthSorted(fn)` — collect the primitives issued inside `fn`, sort them
+  back-to-front by centroid distance to the camera, and draw in that order with
+  `depthTest=false` (transparency-correct). Scopes nest.
+- `depthTested(fn)` — primitives issued inside `fn` get `depthTest=true` (the depth
+  buffer occludes closer-over-farther) and draw in call order. Scopes nest.
+
+Every method returns its first input `Vec3` so a spec can chain an anchor off a
+just-drawn primitive. Positions are plain `Vec3` (no node graph, no keys). Colors
+are `Color` (hex `#rrggbb` or rgb 0..1); `alpha` is per-frame.
 
 ### `Frame`
 `{ step: number; t: number; dt: number; tStep: number; pStep: number; paused: boolean }`
 — `step` is the current segment, `pStep` ∈ [0,1] the progress within it (ease it).
 
 ### Helpers + types
-`clamp01`, `lerp`, `smoothstep`, `ease` (smoothstep-based); types `FigSpec`,
-`FigCtx`, `Frame`, `Keyframe`, `NodePlace`, `FigPos`, `Palette`; `DEFAULT_PALETTE`.
-`setupAnimEngine` (the legacy stepper engine) is also exported for back-compat.
+`clamp01`, `lerp`, `smoothstep`, `ease` (smoothstep-based); `vlerp`, `vadd`,
+`vsub`, `vscale`, `vdot`, `vcross`, `vlen`, `vnorm`, `vmid`, `col`, `colLerp`;
+types `FigSpec`, `FigCtx`, `Frame`, `Keyframe`, `LabelOpts`, `FigPos`, `Palette`;
+`DEFAULT_PALETTE`.
 
 ## Install (bundler)
 ```
-npm install anima-esm react react-dom three   # react optional
+npm install anima-esm react react-dom   # react optional
 ```
 ```ts
 import { createFigure, type FigSpec } from "anima-esm";        // core
