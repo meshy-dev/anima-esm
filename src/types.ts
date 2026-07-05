@@ -20,6 +20,13 @@ export type NodePlace = { abs: THREE.Vector3 } | { from: string; offset: THREE.V
  * framework resolves it to the node's world position after the draw pass). */
 export type FigPos = THREE.Vector3 | string;
 
+/** A color argument: either a fixed {@link THREE.Color} (re-applied each frame
+ *  so a mutated Color is picked up) or a per-frame function `(f: Frame) => THREE.Color`
+ *  the framework evaluates each reconcile frame — letting a figure spec
+ *  animate, dim, or highlight an element via COLOR (the spec's responsibility,
+ *  not a global engine dim). */
+export type ColorArg = THREE.Color | ((f: Frame) => THREE.Color);
+
 /** Options for the {@link FigCtx.label} primitive. */
 export type LabelOpts = {
   /** Text color (default white). */
@@ -44,16 +51,19 @@ export type LabelOpts = {
  * `scope` pushes a key prefix so equal local keys do not collide across scopes. */
 export type FigCtx = {
   node(key: string, place: NodePlace): void;
-  sphere(key: string, pos: FigPos, radius: number, color: THREE.Color, alpha: number): void;
-  line(key: string, a: FigPos, b: FigPos, color: THREE.Color, alpha: number): void;
-  bar(key: string, a: FigPos, b: FigPos, radius: number, color: THREE.Color, alpha: number): void;
-  quad(key: string, verts: FigPos[], color: THREE.Color, alpha: number): void;
+  sphere(key: string, pos: FigPos, radius: number, color: ColorArg, alpha: number): void;
+  line(key: string, a: FigPos, b: FigPos, color: ColorArg, alpha: number): void;
+  bar(key: string, a: FigPos, b: FigPos, radius: number, color: ColorArg, alpha: number): void;
+  quad(key: string, verts: FigPos[], color: ColorArg, alpha: number): void;
   /** Custom primitive: the library calls `factory()` once on first draw to build
    *  a THREE.Object3D, retains it by `key`, and each frame resolves `pos` (a vector
    *  or a node key), sets `object.position`, `object.visible = alpha > 0.001`, and
-   *  traverses materials to set `transparent + opacity = alpha`. On drop the
-   *  library disposes the object's geometry + materials (it built them). */
-  draw(key: string, factory: () => THREE.Object3D, pos: FigPos, alpha: number): void;
+   *  traverses materials to set `transparent + opacity = alpha`. If `colorFn`
+   *  is provided, the framework also evaluates it each frame and sets `.color`
+   *  on every traversed material that has one (lets a `draw`-built wireframe
+   *  animate/dim its color); otherwise the factory's materials own color. On
+   *  drop the library disposes the object's geometry + materials (it built them). */
+  draw(key: string, factory: () => THREE.Object3D, pos: FigPos, alpha: number, colorFn?: (f: Frame) => THREE.Color): void;
   /** 3D-anchored, screen-fixed text label with a rounded-rect backdrop pill.
    *  It sits on a 3D point (its anchor `pos`, resolved each frame so it follows
    *  the anchor as the camera moves), stays a CONSTANT on-screen size by

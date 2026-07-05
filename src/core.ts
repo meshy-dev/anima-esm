@@ -16,13 +16,13 @@ import * as THREE from "three";
 import { OrbitCam } from "./orbit";
 import { clamp01 } from "./helpers";
 import { DEFAULT_PALETTE, type Palette } from "./palette";
-import type { FigCtx, FigEntry, FigPos, FigSpec, Frame, NodePlace } from "./types";
+import type { ColorArg, FigCtx, FigEntry, FigPos, FigSpec, Frame, NodePlace } from "./types";
 
 // Re-export the public surface so `./core` is the single import site (the React
 // wrapper and the core entry both import from here).
 export { clamp01, lerp, smoothstep, ease } from "./helpers";
 export { DEFAULT_PALETTE, type Palette } from "./palette";
-export type { FigSpec, FigCtx, Frame, Keyframe, NodePlace, FigPos, FigEntry, Step, LabelOpts } from "./types";
+export type { FigSpec, FigCtx, Frame, Keyframe, NodePlace, FigPos, FigEntry, Step, LabelOpts, ColorArg } from "./types";
 
 /** Controller returned by {@link createFigure}. Owns the canvas + buttons it
  *  created inside `mount`; call `dispose()` to tear everything down. */
@@ -57,6 +57,13 @@ const LABEL_DEFAULT_COLOR = new THREE.Color(0xffffff);
 const LABEL_DEFAULT_BACKDROP = new THREE.Color(0x000000);
 const LABEL_DEFAULT_SIZE = 0.14;
 const LABEL_BACKDROP_ALPHA = 0.6;
+
+// Evaluate a ColorArg (THREE.Color | (f)=>Color) for a given frame: a plain
+// Color is returned as-is (then .copy'd onto the material each frame, so a
+// mutated Color is picked up); a function is called with the frame to produce
+// the per-frame color — letting a spec animate/dim/highlight via COLOR.
+const evalColor = (c: ColorArg, f: Frame): THREE.Color =>
+    typeof c === "function" ? c(f) : c;
 
 export function createFigure(
     spec: FigSpec,
@@ -243,11 +250,11 @@ export function createFigure(
     // each frame); the library builds + retains the object, sets its position,
     // and owns its geometry/material lifecycle (disposes on drop).
     type DrawCall =
-      | { kind: "sphere"; key: string; pos: FigPos; radius: number; color: THREE.Color; alpha: number }
-      | { kind: "line"; key: string; a: FigPos; b: FigPos; color: THREE.Color; alpha: number }
-      | { kind: "bar"; key: string; a: FigPos; b: FigPos; radius: number; color: THREE.Color; alpha: number }
-      | { kind: "quad"; key: string; verts: FigPos[]; color: THREE.Color; alpha: number }
-      | { kind: "draw"; key: string; factory: () => THREE.Object3D; pos: FigPos; alpha: number }
+      | { kind: "sphere"; key: string; pos: FigPos; radius: number; color: ColorArg; alpha: number }
+      | { kind: "line"; key: string; a: FigPos; b: FigPos; color: ColorArg; alpha: number }
+      | { kind: "bar"; key: string; a: FigPos; b: FigPos; radius: number; color: ColorArg; alpha: number }
+      | { kind: "quad"; key: string; verts: FigPos[]; color: ColorArg; alpha: number }
+      | { kind: "draw"; key: string; factory: () => THREE.Object3D; pos: FigPos; alpha: number; colorFn?: (f: Frame) => THREE.Color }
       | { kind: "label"; key: string; pos: FigPos; text: string; color: THREE.Color; backdrop: boolean; backdropColor: THREE.Color; size: number; alpha: number };
     const nodePlaces = new Map<string, NodePlace>();
     const drawCalls: DrawCall[] = [];
@@ -288,14 +295,15 @@ export function createFigure(
     // on drop): the library owns ONLY its scene membership + per-frame alpha (it
     // sets object.visible + traverses materials to apply opacity); the consumer
     // owns the object's geometry/material lifecycle.
-    const reconcile = (dc: DrawCall): void => {
+    const reconcile = (dc: DrawCall, f: Frame): void => {
       if (dc.kind === "sphere") {
         const pos = resolveFigPos(dc.pos);
         if (!pos) return;
         drawnThisFrame.add(dc.key);
+        const col = evalColor(dc.color, f);
         let e = retained.get(dc.key);
         if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0 });
+          const mat = new THREE.MeshBasicMaterial({ color: col.clone(), transparent: true, opacity: 0 });
           const obj = new THREE.Mesh(sphereGeo, mat);
           scene.add(obj);
           e = { obj, mat, kind: "sphere", ownsGeo: false, sig: "" };
@@ -304,16 +312,17 @@ export function createFigure(
         e.obj.position.copy(pos);
         (e.obj as THREE.Mesh).scale.setScalar(dc.radius);
         const m = e.mat!;
-        m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
+        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
       } else if (dc.kind === "line") {
         const a = resolveFigPos(dc.a), b = resolveFigPos(dc.b);
         if (!a || !b) return;
         drawnThisFrame.add(dc.key);
+        const col = evalColor(dc.color, f);
         const s = sig([a, b]);
         let e = retained.get(dc.key);
         if (!e) {
-          const mat = new THREE.LineBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0 });
+          const mat = new THREE.LineBasicMaterial({ color: col.clone(), transparent: true, opacity: 0 });
           const obj = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]), mat);
           scene.add(obj);
           e = { obj, mat, kind: "line", ownsGeo: true, sig: s };
@@ -324,19 +333,20 @@ export function createFigure(
           e.sig = s;
         }
         const m = e.mat!;
-        m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
+        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
       } else if (dc.kind === "bar") {
         const a = resolveFigPos(dc.a), b = resolveFigPos(dc.b);
         if (!a || !b) return;
         drawnThisFrame.add(dc.key);
+        const col = evalColor(dc.color, f);
         const len = a.distanceTo(b);
         const mid = a.clone().add(b).multiplyScalar(0.5);
         const dir = b.clone().sub(a).normalize();
         const s = dc.radius.toFixed(4) + "|" + sig([a, b]);
         let e = retained.get(dc.key);
         if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0 });
+          const mat = new THREE.MeshBasicMaterial({ color: col.clone(), transparent: true, opacity: 0 });
           const obj = new THREE.Mesh(new THREE.CylinderGeometry(dc.radius, dc.radius, len, 12), mat);
           obj.position.copy(mid);
           obj.quaternion.setFromUnitVectors(UP, dir);
@@ -351,17 +361,18 @@ export function createFigure(
           e.sig = s;
         }
         const m = e.mat!;
-        m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
+        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
       } else if (dc.kind === "quad") {
         const vs = dc.verts.map(resolveFigPos);
         if (vs.some((v) => !v)) return;
         const verts = vs as THREE.Vector3[];
         drawnThisFrame.add(dc.key);
+        const col = evalColor(dc.color, f);
         const s = sig(verts);
         let e = retained.get(dc.key);
         if (!e) {
-          const mat = new THREE.MeshBasicMaterial({ color: dc.color.clone(), transparent: true, opacity: 0, side: THREE.DoubleSide });
+          const mat = new THREE.MeshBasicMaterial({ color: col.clone(), transparent: true, opacity: 0, side: THREE.DoubleSide });
           const obj = new THREE.Mesh(quadGeo(verts), mat);
           scene.add(obj);
           e = { obj, mat, kind: "quad", ownsGeo: true, sig: s };
@@ -372,7 +383,7 @@ export function createFigure(
           e.sig = s;
         }
         const m = e.mat!;
-        m.color.copy(dc.color); m.opacity = clamp01(dc.alpha); m.transparent = true;
+        m.color.copy(col); m.opacity = clamp01(dc.alpha); m.transparent = true;
         e.obj.visible = dc.alpha > 0.001;
       } else if (dc.kind === "label") {
         // 3D-anchored, screen-fixed text label: position is the resolved 3D
@@ -408,7 +419,7 @@ export function createFigure(
         sp.scale.setScalar(dc.size / camera.zoom);
         (sp.material as THREE.SpriteMaterial).opacity = a;
         e.obj.visible = dc.alpha > 0.001;
-      } else { // draw: factory-built THREE.Object3D, retained by key; library sets position + alpha.
+      } else { // draw: factory-built THREE.Object3D, retained by key; library sets position + alpha (+ optional color).
         const pos = resolveFigPos(dc.pos);
         if (!pos) return;
         drawnThisFrame.add(dc.key);
@@ -422,11 +433,15 @@ export function createFigure(
         e.obj.position.copy(pos);
         const a = clamp01(dc.alpha);
         e.obj.visible = dc.alpha > 0.001;
+        const col = dc.colorFn ? dc.colorFn(f) : null;
         e.obj.traverse((o) => {
           const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
           if (!mat) return;
           const mats = Array.isArray(mat) ? mat : [mat];
-          for (const mm of mats) { mm.transparent = true; mm.opacity = a; }
+          for (const mm of mats) {
+            mm.transparent = true; mm.opacity = a;
+            if (col && "color" in mm) (mm as THREE.MeshBasicMaterial).color.copy(col);
+          }
         });
       }
     };
@@ -436,7 +451,7 @@ export function createFigure(
       line(key, a, b, color, alpha) { drawCalls.push({ kind: "line", key: full(key), a, b, color, alpha }); },
       bar(key, a, b, radius, color, alpha) { drawCalls.push({ kind: "bar", key: full(key), a, b, radius, color, alpha }); },
       quad(key, verts, color, alpha) { drawCalls.push({ kind: "quad", key: full(key), verts, color, alpha }); },
-      draw(key, factory, pos, alpha) { drawCalls.push({ kind: "draw", key: full(key), factory, pos, alpha }); },
+      draw(key, factory, pos, alpha, colorFn) { drawCalls.push({ kind: "draw", key: full(key), factory, pos, alpha, colorFn }); },
       label(key, pos, text, opts) { drawCalls.push({ kind: "label", key: full(key), pos, text, color: opts?.color ?? LABEL_DEFAULT_COLOR, backdrop: opts?.backdrop ?? true, backdropColor: opts?.backdropColor ?? LABEL_DEFAULT_BACKDROP, size: opts?.size ?? LABEL_DEFAULT_SIZE, alpha: opts?.alpha ?? 1 }); },
       scope(prefix, fn) { stack.push(prefix); fn(); stack.pop(); },
     };
@@ -513,7 +528,7 @@ export function createFigure(
       resolved.clear(); visiting.clear(); failed.clear();
       draw(ctx, f);
       for (const key of nodePlaces.keys()) resolveNode(key);
-      for (const dc of drawCalls) reconcile(dc);
+      for (const dc of drawCalls) reconcile(dc, f);
       for (const [k, e] of retained) {
         if (!drawnThisFrame.has(k)) { scene.remove(e.obj); disposeEntry(e); retained.delete(k); }
       }
