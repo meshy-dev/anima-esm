@@ -287,6 +287,11 @@ export function createFigure(
     // The stack unwinds back to the bottom after each draw() since the scope
     // methods push/pop synchronously.
     const modeStack: Array<{ depthTest: boolean; collect: Rec[] | null }> = [{ depthTest: false, collect: null }];
+    // label bucket: label primitives issued during draw() are collected here
+    // (instead of routed straight to the draw list) so they can be depth-sorted
+    // back-to-front after the scene — overlapping labels stack correctly (near
+    // labels on top) and render on top of the geometry (depthTest off).
+    const labelBucket: Rec[] = [];
     // label text cache: the ONLY internal retention — keyed by text alone (the
     // text is a white alpha stencil; color is applied in the shader, so the
     // same string in different colors shares one texture). The GL texture is
@@ -504,7 +509,7 @@ export function createFigure(
             vu[w + 5] = bp;
           }
           glr.vlen += 6;
-          emit({ mode: TRI, tex: pillTex, depthTest: false, depthWrite: false,
+          labelBucket.push({ mode: TRI, tex: pillTex, depthTest: false, depthWrite: false,
             idxBase: 0, idxCount: 0, vtxBase: vb, vtxCount: 6, cx: pos[0], cy: pos[1], cz: pos[2] });
         }
         // Text: white alpha stencil colored by `color` @ alpha (vCol * texel =
@@ -520,7 +525,7 @@ export function createFigure(
           vu[w + 5] = tp;
         }
         glr.vlen += 6;
-        emit({ mode: TRI, tex: c.tex, depthTest: false, depthWrite: false,
+        labelBucket.push({ mode: TRI, tex: c.tex, depthTest: false, depthWrite: false,
           idxBase: 0, idxCount: 0, vtxBase: vt, vtxCount: 6, cx: pos[0], cy: pos[1], cz: pos[2] });
         return pos;
       },
@@ -629,6 +634,14 @@ export function createFigure(
       // list; render; then reset. Nothing is retained across frames.
       glr.beginFrame();
       draw(ctx, f);
+      // Depth-sort labels back-to-front and append after the scene so they
+      // render on top of the geometry (near labels last/on top).
+      if (labelBucket.length) {
+        const cp = controls.pos;
+        labelBucket.sort((a, b) => vdist2(cp, [b.cx, b.cy, b.cz]) - vdist2(cp, [a.cx, a.cy, a.cz]));
+        for (const r of labelBucket) glr.add(r);
+        labelBucket.length = 0;
+      }
       const sceneEnd = glr.records.length;
       const cap = kfs[step]?.caption ?? "";
       if (cap !== lastCap) { drawCaption(cap); lastCap = cap; }

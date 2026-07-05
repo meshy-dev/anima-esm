@@ -74,7 +74,7 @@ export class OrbitCam {
     const dx = e.clientX - this.px, dy = e.clientY - this.py;
     this.px = e.clientX; this.py = e.clientY;
     this.thetaT -= dx * 0.005;
-    this.phiT -= dy * 0.005;
+    this.phiT += dy * 0.005;
     this.phiT = Math.max(EPS, Math.min(Math.PI - EPS, this.phiT));
   };
   private onUp = () => { this.dragging = false; this.domElement.style.cursor = "grab"; };

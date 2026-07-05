@@ -70,7 +70,9 @@ in vec4 vCol;
 out vec4 outCol;
 uniform sampler2D uTex;
 void main() {
-  outCol = vCol * texture(uTex, vUV);
+  vec4 c = vCol * texture(uTex, vUV);
+  vec3 s = mix(c.rgb * 12.92, 1.055 * pow(c.rgb, vec3(0.41666666)) - 0.055, step(0.0031308, c.rgb));
+  outCol = vec4(s, c.a);
 }`;
 
 /** Compile + link a program, returning it (throws on failure with the info log). */
@@ -138,7 +140,7 @@ export class GLRenderer {
       antialias: true,
       alpha: true,
       preserveDrawingBuffer: true, // WebM/WebP export reads the canvas back
-      premultipliedAlpha: false,
+      premultipliedAlpha: true,
     });
     if (!gl) throw new Error("anima-esm: WebGL2 unavailable");
     this.gl = gl;
